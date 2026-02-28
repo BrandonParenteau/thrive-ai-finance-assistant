@@ -28,7 +28,7 @@ function RootLayoutNav() {
 }
 
 export default function RootLayout() {
-  const [fontsLoaded] = useFonts({
+  const [fontsLoaded, fontError] = useFonts({
     DM_Sans_400Regular,
     DM_Sans_500Medium,
     DM_Sans_600SemiBold,
@@ -36,14 +36,10 @@ export default function RootLayout() {
   });
 
   useEffect(() => {
-    if (fontsLoaded) {
+    if (fontsLoaded || fontError) {
       SplashScreen.hideAsync();
     }
-  }, [fontsLoaded]);
-
-  if (!fontsLoaded) {
-    return <View style={{ flex: 1, backgroundColor: Colors.dark.background }} />;
-  }
+  }, [fontsLoaded, fontError]);
 
   return (
     <ErrorBoundary>
