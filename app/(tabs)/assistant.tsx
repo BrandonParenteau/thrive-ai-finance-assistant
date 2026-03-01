@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import Animated, {
@@ -18,7 +19,6 @@ import Animated, {
   withSpring,
   withRepeat,
   withTiming,
-  FadeIn,
   FadeInDown,
 } from "react-native-reanimated";
 import { fetch } from "expo/fetch";
@@ -56,12 +56,8 @@ function TypingDots() {
 
   React.useEffect(() => {
     dot1.value = withRepeat(withTiming(1, { duration: 400 }), -1, true);
-    setTimeout(() => {
-      dot2.value = withRepeat(withTiming(1, { duration: 400 }), -1, true);
-    }, 150);
-    setTimeout(() => {
-      dot3.value = withRepeat(withTiming(1, { duration: 400 }), -1, true);
-    }, 300);
+    setTimeout(() => { dot2.value = withRepeat(withTiming(1, { duration: 400 }), -1, true); }, 150);
+    setTimeout(() => { dot3.value = withRepeat(withTiming(1, { duration: 400 }), -1, true); }, 300);
   }, []);
 
   const d1Style = useAnimatedStyle(() => ({ opacity: 0.3 + dot1.value * 0.7, transform: [{ translateY: -dot1.value * 4 }] }));
@@ -121,30 +117,37 @@ function EmptyState({ onPrompt }: { onPrompt: (p: string) => void }) {
   );
 }
 
+function useTabBarHeight() {
+  try {
+    return useBottomTabBarHeight();
+  } catch {
+    return 83;
+  }
+}
+
 export default function AssistantScreen() {
   const insets = useSafeAreaInsets();
+  const tabBarHeight = useTabBarHeight();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [showTyping, setShowTyping] = useState(false);
-  const listRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
 
   const topPad = Platform.OS === "web" ? Math.max(insets.top, 67) : insets.top;
-  const bottomPad = Platform.OS === "web" ? Math.max(insets.bottom, 34) : insets.bottom;
+  const inputBottomPad = Platform.OS === "web"
+    ? Math.max(insets.bottom, 34) + 8
+    : tabBarHeight + 8;
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isStreaming) return;
-
     const trimmed = text.trim();
     const currentMessages = [...messages];
-
     const userMsg: Message = { id: genId(), role: "user", content: trimmed };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsStreaming(true);
     setShowTyping(true);
-
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
     try {
@@ -152,22 +155,15 @@ export default function AssistantScreen() {
         ...currentMessages.map((m) => ({ role: m.role, content: m.content })),
         { role: "user", content: trimmed },
       ];
-
       const baseUrl = getApiUrl();
       const response = await fetch(`${baseUrl}api/chat`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-        },
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({ messages: chatHistory }),
       });
-
       if (!response.ok) throw new Error("Request failed");
-
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No stream");
-
       const decoder = new TextDecoder();
       let buffer = "";
       let fullContent = "";
@@ -176,11 +172,9 @@ export default function AssistantScreen() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
-
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6);
@@ -191,18 +185,12 @@ export default function AssistantScreen() {
               fullContent += parsed.content;
               if (!assistantAdded) {
                 setShowTyping(false);
-                setMessages((prev) => [
-                  ...prev,
-                  { id: genId(), role: "assistant", content: fullContent },
-                ]);
+                setMessages((prev) => [...prev, { id: genId(), role: "assistant", content: fullContent }]);
                 assistantAdded = true;
               } else {
                 setMessages((prev) => {
                   const updated = [...prev];
-                  updated[updated.length - 1] = {
-                    ...updated[updated.length - 1],
-                    content: fullContent,
-                  };
+                  updated[updated.length - 1] = { ...updated[updated.length - 1], content: fullContent };
                   return updated;
                 });
               }
@@ -210,16 +198,9 @@ export default function AssistantScreen() {
           } catch {}
         }
       }
-    } catch (err) {
+    } catch {
       setShowTyping(false);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: genId(),
-          role: "assistant",
-          content: "Sorry, I had trouble connecting. Please try again.",
-        },
-      ]);
+      setMessages((prev) => [...prev, { id: genId(), role: "assistant", content: "Sorry, I had trouble connecting. Please try again." }]);
     } finally {
       setIsStreaming(false);
       setShowTyping(false);
@@ -233,7 +214,6 @@ export default function AssistantScreen() {
   }, [input, sendMessage]);
 
   const reversedMessages = [...messages].reverse();
-
   const sendScale = useSharedValue(1);
   const sendStyle = useAnimatedStyle(() => ({ transform: [{ scale: sendScale.value }] }));
 
@@ -253,10 +233,9 @@ export default function AssistantScreen() {
       <KeyboardAvoidingView
         style={styles.chatContainer}
         behavior="padding"
-        keyboardVerticalOffset={0}
+        keyboardVerticalOffset={tabBarHeight}
       >
         <FlatList
-          ref={listRef}
           data={reversedMessages}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => <MessageBubble message={item} />}
@@ -271,7 +250,7 @@ export default function AssistantScreen() {
           showsVerticalScrollIndicator={false}
         />
 
-        <View style={[styles.inputContainer, { paddingBottom: bottomPad + 8 }]}>
+        <View style={[styles.inputContainer, { paddingBottom: inputBottomPad }]}>
           <View style={styles.inputRow}>
             <TextInput
               ref={inputRef}
@@ -292,10 +271,7 @@ export default function AssistantScreen() {
                 onPressIn={() => { sendScale.value = withSpring(0.9); }}
                 onPressOut={() => { sendScale.value = withSpring(1); }}
                 disabled={isStreaming || !input.trim()}
-                style={[
-                  styles.sendBtn,
-                  (!input.trim() || isStreaming) && styles.sendBtnDisabled,
-                ]}
+                style={[styles.sendBtn, (!input.trim() || isStreaming) && styles.sendBtnDisabled]}
               >
                 {isStreaming ? (
                   <ActivityIndicator size="small" color="#000" />
@@ -314,202 +290,55 @@ export default function AssistantScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
   header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 20,
-    paddingBottom: 12,
+    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
+    paddingHorizontal: 20, paddingBottom: 12,
   },
-  headerTitle: {
-    fontFamily: "DM_Sans_700Bold",
-    fontSize: 28,
-    color: C.text,
-    letterSpacing: -0.5,
-  },
-  headerSubtitle: {
-    fontFamily: "DM_Sans_400Regular",
-    fontSize: 13,
-    color: C.textMuted,
-  },
+  headerTitle: { fontFamily: "DM_Sans_700Bold", fontSize: 28, color: C.text, letterSpacing: -0.5 },
+  headerSubtitle: { fontFamily: "DM_Sans_400Regular", fontSize: 13, color: C.textMuted },
   statusDot: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: `${C.positive}18`,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: `${C.positive}18`, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20,
   },
-  onlineDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-    backgroundColor: C.positive,
-  },
-  onlineText: {
-    fontFamily: "DM_Sans_500Medium",
-    fontSize: 12,
-    color: C.positive,
-  },
+  onlineDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: C.positive },
+  onlineText: { fontFamily: "DM_Sans_500Medium", fontSize: 12, color: C.positive },
   chatContainer: { flex: 1 },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 8,
-    flexGrow: 1,
-  },
-  bubbleContainer: {
-    flexDirection: "row",
-    marginBottom: 12,
-    alignItems: "flex-end",
-    gap: 8,
-  },
-  bubbleContainerUser: {
-    justifyContent: "flex-end",
-  },
+  listContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, flexGrow: 1 },
+  bubbleContainer: { flexDirection: "row", marginBottom: 12, alignItems: "flex-end", gap: 8 },
+  bubbleContainerUser: { justifyContent: "flex-end" },
   avatarContainer: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: `${C.tint}20`,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 2,
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: `${C.tint}20`, alignItems: "center", justifyContent: "center", marginBottom: 2,
   },
-  bubble: {
-    maxWidth: "78%",
-    borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  bubbleUser: {
-    backgroundColor: C.tint,
-    borderBottomRightRadius: 4,
-  },
-  bubbleAssistant: {
-    backgroundColor: C.elevated,
-    borderBottomLeftRadius: 4,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
-  bubbleText: {
-    fontFamily: "DM_Sans_400Regular",
-    fontSize: 15,
-    color: C.text,
-    lineHeight: 22,
-  },
-  bubbleTextUser: {
-    color: "#000",
-    fontFamily: "DM_Sans_500Medium",
-  },
-  typingBubble: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    marginBottom: 12,
-  },
+  bubble: { maxWidth: "78%", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10 },
+  bubbleUser: { backgroundColor: C.tint, borderBottomRightRadius: 4 },
+  bubbleAssistant: { backgroundColor: C.elevated, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: C.border },
+  bubbleText: { fontFamily: "DM_Sans_400Regular", fontSize: 15, color: C.text, lineHeight: 22 },
+  bubbleTextUser: { color: "#000", fontFamily: "DM_Sans_500Medium" },
+  typingBubble: { flexDirection: "row", alignItems: "flex-end", marginBottom: 12 },
   typingDots: {
-    flexDirection: "row",
-    gap: 4,
-    backgroundColor: C.elevated,
-    borderRadius: 18,
-    borderBottomLeftRadius: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    borderWidth: 1,
-    borderColor: C.border,
+    flexDirection: "row", gap: 4, backgroundColor: C.elevated,
+    borderRadius: 18, borderBottomLeftRadius: 4,
+    paddingHorizontal: 14, paddingVertical: 14, borderWidth: 1, borderColor: C.border,
   },
-  dot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-    backgroundColor: C.tint,
-  },
-  emptyState: {
-    flex: 1,
-    alignItems: "center",
-    paddingTop: 40,
-    paddingHorizontal: 16,
-    gap: 12,
-  },
+  dot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: C.tint },
+  emptyState: { flex: 1, alignItems: "center", paddingTop: 40, paddingHorizontal: 16, gap: 12 },
   emptyIcon: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: `${C.tint}18`,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 4,
-    borderWidth: 1,
-    borderColor: `${C.tint}30`,
+    width: 64, height: 64, borderRadius: 32,
+    backgroundColor: `${C.tint}18`, alignItems: "center", justifyContent: "center",
+    marginBottom: 4, borderWidth: 1, borderColor: `${C.tint}30`,
   },
-  emptyTitle: {
-    fontFamily: "DM_Sans_700Bold",
-    fontSize: 22,
-    color: C.text,
-    textAlign: "center",
-  },
-  emptySubtitle: {
-    fontFamily: "DM_Sans_400Regular",
-    fontSize: 14,
-    color: C.textSecondary,
-    textAlign: "center",
-    lineHeight: 22,
-    marginBottom: 8,
-  },
-  quickPromptsGrid: {
-    width: "100%",
-    gap: 8,
-  },
-  quickPrompt: {
-    backgroundColor: C.card,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
-  quickPromptText: {
-    fontFamily: "DM_Sans_500Medium",
-    fontSize: 13,
-    color: C.textSecondary,
-  },
-  inputContainer: {
-    backgroundColor: C.background,
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: C.border,
-  },
+  emptyTitle: { fontFamily: "DM_Sans_700Bold", fontSize: 22, color: C.text, textAlign: "center" },
+  emptySubtitle: { fontFamily: "DM_Sans_400Regular", fontSize: 14, color: C.textSecondary, textAlign: "center", lineHeight: 22, marginBottom: 8 },
+  quickPromptsGrid: { width: "100%", gap: 8 },
+  quickPrompt: { backgroundColor: C.card, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: C.border },
+  quickPromptText: { fontFamily: "DM_Sans_500Medium", fontSize: 13, color: C.textSecondary },
+  inputContainer: { backgroundColor: C.background, paddingHorizontal: 16, paddingTop: 8, borderTopWidth: 1, borderTopColor: C.border },
   inputRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 10,
-    backgroundColor: C.elevated,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: C.borderStrong,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    flexDirection: "row", alignItems: "flex-end", gap: 10,
+    backgroundColor: C.elevated, borderRadius: 20, borderWidth: 1, borderColor: C.borderStrong,
+    paddingHorizontal: 14, paddingVertical: 8,
   },
-  input: {
-    flex: 1,
-    fontFamily: "DM_Sans_400Regular",
-    fontSize: 15,
-    color: C.text,
-    maxHeight: 100,
-    paddingVertical: 4,
-  },
-  sendBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: C.tint,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  sendBtnDisabled: {
-    backgroundColor: C.elevated,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
+  input: { flex: 1, fontFamily: "DM_Sans_400Regular", fontSize: 15, color: C.text, maxHeight: 100, paddingVertical: 4 },
+  sendBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.tint, alignItems: "center", justifyContent: "center" },
+  sendBtnDisabled: { backgroundColor: C.elevated, borderWidth: 1, borderColor: C.border },
 });

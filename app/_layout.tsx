@@ -1,5 +1,5 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { Stack } from "expo-router";
+import { Stack, router, useSegments } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -7,6 +7,7 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { queryClient } from "@/lib/query-client";
 import { FinanceProvider } from "@/context/FinanceContext";
+import { AuthProvider, useAuth } from "@/context/AuthContext";
 import {
   DM_Sans_400Regular,
   DM_Sans_500Medium,
@@ -14,16 +15,46 @@ import {
   DM_Sans_700Bold,
   useFonts,
 } from "@expo-google-fonts/dm-sans";
-import { View } from "react-native";
 import Colors from "@/constants/colors";
 
 SplashScreen.preventAutoHideAsync();
 
+function AuthGate() {
+  const { user, token, isLoading } = useAuth();
+  const segments = useSegments();
+
+  useEffect(() => {
+    if (isLoading) return;
+    const inAuth = segments[0] === "(auth)";
+    const inOnboarding = segments[0] === "onboarding";
+    if (!token) {
+      if (!inAuth) router.replace("/(auth)/login");
+    } else if (token && !user?.onboarding_complete) {
+      if (!inOnboarding) router.replace("/onboarding/income");
+    } else if (token && user?.onboarding_complete) {
+      if (inAuth || inOnboarding) router.replace("/(tabs)");
+    }
+  }, [isLoading, token, user, segments]);
+
+  return null;
+}
+
 function RootLayoutNav() {
   return (
-    <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-    </Stack>
+    <>
+      <AuthGate />
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen
+          name="(auth)"
+          options={{ presentation: "modal", headerShown: false }}
+        />
+        <Stack.Screen
+          name="onboarding"
+          options={{ presentation: "modal", headerShown: false }}
+        />
+      </Stack>
+    </>
   );
 }
 
@@ -44,13 +75,15 @@ export default function RootLayout() {
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
-        <FinanceProvider>
-          <GestureHandlerRootView style={{ flex: 1, backgroundColor: Colors.dark.background }}>
-            <KeyboardProvider>
-              <RootLayoutNav />
-            </KeyboardProvider>
-          </GestureHandlerRootView>
-        </FinanceProvider>
+        <AuthProvider>
+          <FinanceProvider>
+            <GestureHandlerRootView style={{ flex: 1, backgroundColor: Colors.dark.background }}>
+              <KeyboardProvider>
+                <RootLayoutNav />
+              </KeyboardProvider>
+            </GestureHandlerRootView>
+          </FinanceProvider>
+        </AuthProvider>
       </QueryClientProvider>
     </ErrorBoundary>
   );
