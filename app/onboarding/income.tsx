@@ -58,7 +58,7 @@ export default function IncomeScreen() {
 
       <Ionicons name="cash-outline" size={48} color={C.tint} style={{ marginBottom: 20 }} />
 
-      <Text style={styles.title}>What's your monthly income?</Text>
+      <Text style={styles.title}>What&apos;s your monthly income?</Text>
       <Text style={styles.subtitle}>
         This helps us set realistic budgets and savings goals tailored to you.
       </Text>

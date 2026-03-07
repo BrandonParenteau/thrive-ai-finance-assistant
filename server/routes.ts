@@ -1,24 +1,53 @@
 import type { Express } from "express";
 import { createServer, type Server } from "node:http";
+import crypto from "node:crypto";
 import OpenAI from "openai";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { query } from "./db";
 import { PlaidApi, PlaidEnvironments, Configuration, Products, CountryCode } from "plaid";
+import { z } from "zod";
+import rateLimit from "express-rate-limit";
+
+// ── Startup validation — crash immediately if critical secrets are missing ──
+
+const JWT_SECRET = process.env.SESSION_SECRET;
+if (!JWT_SECRET) throw new Error("SESSION_SECRET environment variable is required. Generate one with: node -e \"console.log(require('crypto').randomBytes(64).toString('hex'))\"");
+
+const ENCRYPTION_KEY_HEX = process.env.ENCRYPTION_KEY;
+if (!ENCRYPTION_KEY_HEX) throw new Error("ENCRYPTION_KEY environment variable is required. Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"");
+if (ENCRYPTION_KEY_HEX.length !== 64) throw new Error("ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes)");
+const ENCRYPTION_KEY = Buffer.from(ENCRYPTION_KEY_HEX, "hex");
+
+// ── Encryption helpers for Plaid access tokens ────────────────────────────
+
+function encryptToken(text: string): string {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-cbc", ENCRYPTION_KEY, iv);
+  const encrypted = cipher.update(text, "utf8", "hex") + cipher.final("hex");
+  return iv.toString("hex") + ":" + encrypted;
+}
+
+function decryptToken(encrypted: string): string {
+  const [ivHex, data] = encrypted.split(":");
+  const decipher = crypto.createDecipheriv("aes-256-cbc", ENCRYPTION_KEY, Buffer.from(ivHex, "hex"));
+  return decipher.update(data, "hex", "utf8") + decipher.final("utf8");
+}
+
+// ── OpenAI ────────────────────────────────────────────────────────────────
 
 const openai = new OpenAI({
-  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-const JWT_SECRET = process.env.SESSION_SECRET || "thrive-jwt-secret-fallback";
+// ── Plaid ─────────────────────────────────────────────────────────────────
 
-const PLAID_CONFIGURED =
-  !!process.env.PLAID_CLIENT_ID && !!process.env.PLAID_SECRET;
+const PLAID_CONFIGURED = !!process.env.PLAID_CLIENT_ID && !!process.env.PLAID_SECRET;
 
 let plaidClient: PlaidApi | null = null;
 if (PLAID_CONFIGURED) {
-  const plaidEnv = process.env.PLAID_ENV || "sandbox";
+  const plaidEnv = (process.env.PLAID_ENV || "sandbox").trim().toLowerCase();
+  console.log(`Plaid initializing with environment: ${plaidEnv}`);
   const config = new Configuration({
     basePath:
       PlaidEnvironments[plaidEnv as keyof typeof PlaidEnvironments] ||
@@ -33,19 +62,101 @@ if (PLAID_CONFIGURED) {
   plaidClient = new PlaidApi(config);
 }
 
+// ── Auth middleware ───────────────────────────────────────────────────────
+
 function authMiddleware(req: any, res: any, next: any) {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   try {
-    const payload = jwt.verify(auth.slice(7), JWT_SECRET) as any;
+    const payload = jwt.verify(auth.slice(7), JWT_SECRET!) as any;
     req.userId = payload.userId;
     next();
   } catch {
     return res.status(401).json({ error: "Invalid token" });
   }
 }
+
+// ── Rate limiters ─────────────────────────────────────────────────────────
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  message: { error: "Too many attempts. Please try again in 15 minutes." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 20,
+  message: { error: "Too many messages. Please slow down." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const plaidLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: "Too many Plaid requests. Please slow down." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// ── Validation schemas ────────────────────────────────────────────────────
+
+const registerSchema = z.object({
+  email: z.string().email("Invalid email address").max(255),
+  password: z
+    .string()
+    .min(8, "Password must be at least 8 characters")
+    .max(128, "Password must be under 128 characters"),
+});
+
+const loginSchema = z.object({
+  email: z.string().email().max(255),
+  password: z.string().min(1).max(128),
+});
+
+const profileSchema = z.object({
+  monthly_income: z.number().positive().finite().optional(),
+  onboarding_complete: z.boolean().optional(),
+});
+
+const createAccountSchema = z.object({
+  name: z.string().min(1).max(100),
+  institution: z.string().min(1).max(100),
+  type: z.enum(["chequing", "savings", "tfsa", "rrsp", "fhsa", "resp", "investment", "credit"]),
+  balance: z.number().finite(),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
+});
+
+const createTransactionSchema = z.object({
+  account_id: z.string().max(100).optional().nullable(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format"),
+  description: z.string().min(1).max(255),
+  amount: z.number().finite(),
+  category: z.string().max(50).optional(),
+  merchant: z.string().max(255).optional().nullable(),
+});
+
+const updateTransactionSchema = z.object({
+  description: z.string().min(1).max(255),
+  amount: z.number().finite(),
+  category: z.string().max(50),
+  merchant: z.string().max(255).optional().nullable(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format"),
+});
+
+const budgetSchema = z.object({
+  budgets: z.array(z.object({
+    category: z.string().min(1).max(50),
+    limit_amount: z.number().positive().finite(),
+  })).max(50),
+});
+
+// ── AI System prompt ──────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are Thrive, a friendly and knowledgeable Canadian personal finance assistant. You help Canadians with:
 - TFSA (Tax-Free Savings Account) — contribution room, strategies, eligible investments
@@ -66,11 +177,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ── Auth ──────────────────────────────────────────────────────────────────
 
-  app.post("/api/auth/register", async (req, res) => {
+  app.post("/api/auth/register", authLimiter, async (req, res) => {
     try {
-      const { email, password } = req.body;
-      if (!email || !password) return res.status(400).json({ error: "Email and password required" });
-      if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
+      const result = registerSchema.safeParse(req.body);
+      if (!result.success) return res.status(400).json({ error: result.error.issues[0].message });
+      const { email, password } = result.data;
 
       const existing = await query("SELECT id FROM thrive_users WHERE email = $1", [email.toLowerCase()]);
       if (existing.length > 0) return res.status(409).json({ error: "An account with this email already exists" });
@@ -81,33 +192,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
         [email.toLowerCase(), hash]
       );
       const user = users[0];
-      const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "30d" });
-      res.json({ token, user });
+      const token = jwt.sign({ userId: user.id }, JWT_SECRET!, { expiresIn: "7d" });
+      res.status(201).json({ token, user });
     } catch (err) {
-      console.error("Register error:", err);
+      console.error("Register error");
       res.status(500).json({ error: "Registration failed" });
     }
   });
 
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", authLimiter, async (req, res) => {
     try {
-      const { email, password } = req.body;
-      if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+      const result = loginSchema.safeParse(req.body);
+      if (!result.success) return res.status(400).json({ error: "Invalid email or password" });
+      const { email, password } = result.data;
 
       const users = await query(
         "SELECT id, email, password_hash, monthly_income, onboarding_complete FROM thrive_users WHERE email = $1",
         [email.toLowerCase()]
       );
-      if (users.length === 0) return res.status(401).json({ error: "Invalid email or password" });
 
-      const user = users[0];
-      const valid = await bcrypt.compare(password, user.password_hash);
-      if (!valid) return res.status(401).json({ error: "Invalid email or password" });
+      // Constant-time comparison — always run bcrypt even if user doesn't exist
+      // to prevent user enumeration via timing attacks
+      const dummyHash = "$2a$12$dummy.hash.to.prevent.timing.attacks.padding.padding";
+      const hash = users.length > 0 ? (users[0] as any).password_hash : dummyHash;
+      const valid = await bcrypt.compare(password, hash);
 
-      const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "30d" });
+      if (users.length === 0 || !valid) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+
+      const user = users[0] as any;
+      const token = jwt.sign({ userId: user.id }, JWT_SECRET!, { expiresIn: "7d" });
       res.json({ token, user: { id: user.id, email: user.email, monthly_income: user.monthly_income, onboarding_complete: user.onboarding_complete } });
     } catch (err) {
-      console.error("Login error:", err);
+      console.error("Login error");
       res.status(500).json({ error: "Login failed" });
     }
   });
@@ -127,7 +245,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.put("/api/auth/profile", authMiddleware, async (req: any, res) => {
     try {
-      const { monthly_income, onboarding_complete } = req.body;
+      const result = profileSchema.safeParse(req.body);
+      if (!result.success) return res.status(400).json({ error: result.error.issues[0].message });
+      const { monthly_income, onboarding_complete } = result.data;
+
       const updates: string[] = [];
       const params: any[] = [];
       let idx = 1;
@@ -141,8 +262,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
       res.json(users[0]);
     } catch (err) {
-      console.error("Profile update error:", err);
+      console.error("Profile update error");
       res.status(500).json({ error: "Failed to update profile" });
+    }
+  });
+
+  // Account deletion — PIPEDA compliance
+  app.delete("/api/auth/account", authMiddleware, async (req: any, res) => {
+    try {
+      // Revoke all Plaid items first
+      if (plaidClient) {
+        const items = await query("SELECT * FROM thrive_plaid_items WHERE user_id = $1", [req.userId]);
+        for (const item of items as any[]) {
+          try {
+            await plaidClient.itemRemove({ access_token: decryptToken(item.access_token) });
+          } catch { /* best effort */ }
+        }
+      }
+      // Delete all user data
+      await query("DELETE FROM thrive_transactions WHERE user_id = $1", [req.userId]);
+      await query("DELETE FROM thrive_user_budgets WHERE user_id = $1", [req.userId]);
+      await query("DELETE FROM thrive_accounts WHERE user_id = $1", [req.userId]);
+      await query("DELETE FROM thrive_plaid_items WHERE user_id = $1", [req.userId]);
+      await query("DELETE FROM thrive_plaid_sessions WHERE user_id = $1", [req.userId]);
+      await query("DELETE FROM thrive_users WHERE id = $1", [req.userId]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Account deletion error");
+      res.status(500).json({ error: "Failed to delete account" });
     }
   });
 
@@ -162,21 +309,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/accounts", authMiddleware, async (req: any, res) => {
     try {
-      const { name, institution, type, balance, color } = req.body;
-      const id = `acc_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+      const result = createAccountSchema.safeParse(req.body);
+      if (!result.success) return res.status(400).json({ error: result.error.issues[0].message });
+      const { name, institution, type, balance, color } = result.data;
+
+      const id = `acc_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
       const accounts = await query(
         "INSERT INTO thrive_accounts (id, user_id, name, institution, type, balance, color) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-        [id, req.userId, name, institution, type, balance || 0, color || "#00D4A0"]
+        [id, req.userId, name, institution, type, balance, color || "#00D4A0"]
       );
-      res.json(accounts[0]);
+      res.status(201).json(accounts[0]);
     } catch (err) {
-      console.error("Add account error:", err);
+      console.error("Add account error");
       res.status(500).json({ error: "Failed to add account" });
     }
   });
 
   app.delete("/api/accounts/:id", authMiddleware, async (req: any, res) => {
     try {
+      // Validate ID format to prevent path traversal
+      if (!/^[a-zA-Z0-9_-]+$/.test(req.params.id)) {
+        return res.status(400).json({ error: "Invalid account ID" });
+      }
       await query("DELETE FROM thrive_accounts WHERE id = $1 AND user_id = $2", [req.params.id, req.userId]);
       res.json({ success: true });
     } catch {
@@ -200,22 +354,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/transactions", authMiddleware, async (req: any, res) => {
     try {
-      const { account_id, date, description, amount, category, merchant } = req.body;
-      const id = `tx_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+      const result = createTransactionSchema.safeParse(req.body);
+      if (!result.success) return res.status(400).json({ error: result.error.issues[0].message });
+      const { account_id, date, description, amount, category, merchant } = result.data;
+
+      const id = `tx_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
       const txs = await query(
         "INSERT INTO thrive_transactions (id, user_id, account_id, date, description, amount, category, merchant) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
         [id, req.userId, account_id || null, date, description, amount, category || "Other", merchant || null]
       );
-      res.json(txs[0]);
+      res.status(201).json(txs[0]);
     } catch (err) {
-      console.error("Add tx error:", err);
+      console.error("Add tx error");
       res.status(500).json({ error: "Failed to add transaction" });
     }
   });
 
   app.put("/api/transactions/:id", authMiddleware, async (req: any, res) => {
     try {
-      const { description, amount, category, merchant, date } = req.body;
+      if (!/^[a-zA-Z0-9_-]+$/.test(req.params.id)) {
+        return res.status(400).json({ error: "Invalid transaction ID" });
+      }
+      const result = updateTransactionSchema.safeParse(req.body);
+      if (!result.success) return res.status(400).json({ error: result.error.issues[0].message });
+      const { description, amount, category, merchant, date } = result.data;
+
       const txs = await query(
         `UPDATE thrive_transactions SET description=$1, amount=$2, category=$3, merchant=$4, date=$5 WHERE id=$6 AND user_id=$7 RETURNING *`,
         [description, amount, category, merchant || null, date, req.params.id, req.userId]
@@ -223,13 +386,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (txs.length === 0) return res.status(404).json({ error: "Transaction not found" });
       res.json(txs[0]);
     } catch (err) {
-      console.error("Update tx error:", err);
+      console.error("Update tx error");
       res.status(500).json({ error: "Failed to update transaction" });
     }
   });
 
   app.delete("/api/transactions/:id", authMiddleware, async (req: any, res) => {
     try {
+      if (!/^[a-zA-Z0-9_-]+$/.test(req.params.id)) {
+        return res.status(400).json({ error: "Invalid transaction ID" });
+      }
       await query("DELETE FROM thrive_transactions WHERE id = $1 AND user_id = $2", [req.params.id, req.userId]);
       res.json({ success: true });
     } catch {
@@ -253,8 +419,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.put("/api/budgets", authMiddleware, async (req: any, res) => {
     try {
-      const { budgets } = req.body as { budgets: { category: string; limit_amount: number }[] };
-      for (const b of budgets) {
+      const result = budgetSchema.safeParse(req.body);
+      if (!result.success) return res.status(400).json({ error: result.error.issues[0].message });
+
+      for (const b of result.data.budgets) {
         await query(
           `INSERT INTO thrive_user_budgets (user_id, category, limit_amount) VALUES ($1,$2,$3)
            ON CONFLICT (user_id, category) DO UPDATE SET limit_amount = $3`,
@@ -263,43 +431,58 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       res.json({ success: true });
     } catch (err) {
-      console.error("Budgets update error:", err);
+      console.error("Budgets update error");
       res.status(500).json({ error: "Failed to update budgets" });
     }
   });
 
   // ── Plaid ─────────────────────────────────────────────────────────────────
 
-  app.post("/api/plaid/link-token", authMiddleware, async (req: any, res) => {
+  app.post("/api/plaid/link-token", authMiddleware, plaidLimiter, async (req: any, res) => {
     if (!plaidClient) {
-      return res.status(503).json({ error: "Plaid not configured. Add PLAID_CLIENT_ID and PLAID_SECRET environment variables." });
+      return res.status(503).json({ error: "Plaid not configured." });
     }
     try {
       const response = await plaidClient.linkTokenCreate({
-        user: { client_user_id: req.userId },
+        user: { client_user_id: String(req.userId) },
         client_name: "Thrive",
         products: [Products.Transactions],
         country_codes: [CountryCode.Ca],
         language: "en",
-        redirect_uri: process.env.PLAID_REDIRECT_URI,
+        redirect_uri: (process.env.PLAID_REDIRECT_URI || process.env.PLAID_PRODUCTION_REDIRECT_URI) ?? undefined,
       });
-      res.json({ link_token: response.data.link_token });
+
+      // Create a short-lived single-use session token — never expose JWT in URLs
+      const sessionToken = crypto.randomBytes(32).toString("hex");
+      await query(
+        "INSERT INTO thrive_plaid_sessions (token, user_id, link_token, expires_at) VALUES ($1,$2,$3, NOW() + INTERVAL '10 minutes')",
+        [sessionToken, req.userId, response.data.link_token]
+      );
+
+      res.json({ session_token: sessionToken });
     } catch (err: any) {
-      console.error("Plaid link token error:", err?.response?.data || err);
+      console.error("Plaid link token error:", err?.response?.data?.error_code || "unknown");
       res.status(500).json({ error: "Failed to create Plaid link token" });
     }
   });
 
-  app.post("/api/plaid/exchange-token", authMiddleware, async (req: any, res) => {
+  app.post("/api/plaid/exchange-token", authMiddleware, plaidLimiter, async (req: any, res) => {
     if (!plaidClient) return res.status(503).json({ error: "Plaid not configured" });
     try {
       const { public_token, institution_name } = req.body;
+      if (!public_token || typeof public_token !== "string") {
+        return res.status(400).json({ error: "Missing public_token" });
+      }
+
       const exchangeResp = await plaidClient.itemPublicTokenExchange({ public_token });
       const { access_token, item_id } = exchangeResp.data;
 
+      // Encrypt access token before storing
+      const encryptedToken = encryptToken(access_token);
+
       await query(
         "INSERT INTO thrive_plaid_items (user_id, access_token, item_id, institution_name) VALUES ($1,$2,$3,$4)",
-        [req.userId, access_token, item_id, institution_name || "Connected Bank"]
+        [req.userId, encryptedToken, item_id, institution_name || "Connected Bank"]
       );
 
       const accountsResp = await plaidClient.accountsGet({ access_token });
@@ -319,48 +502,118 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       res.json({ success: true, accounts_synced: plaidAccounts.length });
     } catch (err: any) {
-      console.error("Plaid exchange error:", err?.response?.data || err);
+      console.error("Plaid exchange error:", err?.response?.data?.error_code || "unknown");
       res.status(500).json({ error: "Failed to exchange Plaid token" });
     }
   });
 
-  app.post("/api/plaid/sync-transactions", authMiddleware, async (req: any, res) => {
+  app.post("/api/plaid/sync-transactions", authMiddleware, plaidLimiter, async (req: any, res) => {
     if (!plaidClient) return res.status(503).json({ error: "Plaid not configured" });
     try {
       const items = await query("SELECT * FROM thrive_plaid_items WHERE user_id = $1", [req.userId]);
       let totalSynced = 0;
-      for (const item of items) {
+      let totalInserted = 0;
+
+      for (const item of items as any[]) {
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - 90);
-        const txResp = await plaidClient.transactionsGet({
-          access_token: item.access_token,
-          start_date: startDate.toISOString().split("T")[0],
-          end_date: new Date().toISOString().split("T")[0],
-        });
-        for (const tx of txResp.data.transactions) {
-          const amount = tx.amount * -1;
-          const cat = tx.personal_finance_category?.primary || "Other";
-          await query(
-            `INSERT INTO thrive_transactions (id, user_id, account_id, date, description, amount, category, merchant, plaid_transaction_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             ON CONFLICT (id) DO NOTHING`,
-            [`plaid_tx_${tx.transaction_id}`, req.userId, `plaid_${tx.account_id}`, tx.date, tx.name, amount, mapPlaidCategory(cat), tx.merchant_name || null, tx.transaction_id]
-          );
+        const accessToken = decryptToken(item.access_token);
+
+        // Paginate through all transactions
+        let offset = 0;
+        const count = 250;
+        let hasMore = true;
+
+        while (hasMore) {
+          const txResp = await plaidClient.transactionsGet({
+            access_token: accessToken,
+            start_date: startDate.toISOString().split("T")[0],
+            end_date: new Date().toISOString().split("T")[0],
+            options: { count, offset },
+          });
+
+          const { transactions, total_transactions } = txResp.data;
+          console.log(`[sync] offset=${offset} fetched=${transactions.length} total=${total_transactions}`);
+
+          for (const tx of transactions) {
+            const amount = tx.amount * -1;
+            const primary = tx.personal_finance_category?.primary || tx.category?.[0] || "Other";
+            const detailed = tx.personal_finance_category?.detailed || tx.category?.[1] || "";
+            const mappedCategory = mapPlaidCategory(primary, detailed);
+
+            // Log anything that still falls to Other so we can improve mappings
+            if (mappedCategory === "Other") {
+              console.log(`[sync] unmapped category — primary="${primary}" detailed="${detailed}" merchant="${tx.merchant_name}" name="${tx.name}"`);
+            }
+
+            await query(
+              `INSERT INTO thrive_transactions (id, user_id, account_id, date, description, amount, category, merchant, plaid_transaction_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+               ON CONFLICT (id) DO UPDATE SET amount=$6, category=$7, merchant=$8`,
+              [`plaid_tx_${tx.transaction_id}`, req.userId, `plaid_${tx.account_id}`, tx.date, tx.name, amount, mappedCategory, tx.merchant_name || null, tx.transaction_id]
+            );
+            totalInserted++;
+          }
+
+          totalSynced += transactions.length;
+          offset += transactions.length;
+          hasMore = offset < total_transactions;
         }
-        totalSynced += txResp.data.transactions.length;
       }
+
+      console.log(`[sync] complete — fetched=${totalSynced} inserted/updated=${totalInserted}`);
       res.json({ success: true, synced: totalSynced });
     } catch (err: any) {
-      console.error("Plaid sync error:", err?.response?.data || err);
+      const plaidError = err?.response?.data;
+      console.error("Plaid sync error:", plaidError || err?.message || err);
+      // Return meaningful error to client
+      if (plaidError?.error_code === "PRODUCT_NOT_READY") {
+        return res.status(202).json({ 
+          success: false, 
+          error: "Your bank is still preparing your transaction history. Please try again in a few minutes." 
+        });
+      }
       res.status(500).json({ error: "Failed to sync Plaid transactions" });
     }
   });
 
-  // ── Plaid Link hosted page ────────────────────────────────────────────────
+  // ── Plaid Link hosted page — uses session token, never JWT ───────────────
 
-  app.get("/plaid-link", (req, res) => {
-    const { token, userId, authToken } = req.query;
-    if (!token) return res.status(400).send("Missing link token");
+  app.get("/plaid-link", async (req, res) => {
+    const { session } = req.query;
+    if (!session || typeof session !== "string" || !/^[a-f0-9]{64}$/.test(session)) {
+      return res.status(400).send(`Invalid or missing session token. Got: ${JSON.stringify(session)}`);
+    }
+
+    try {
+      // Validate session token
+      const sessions = await query(
+        "SELECT * FROM thrive_plaid_sessions WHERE token = $1 AND expires_at > NOW()",
+        [session]
+      ) as any[];
+
+      console.log(`[plaid-link] session lookup for token=${session.slice(0,8)}... found=${sessions.length} rows`);
+
+      if (sessions.length === 0) {
+        // Debug: check if token exists at all (ignoring expiry)
+        const anySession = await query(
+          "SELECT token, expires_at, NOW() as now FROM thrive_plaid_sessions WHERE token = $1",
+          [session]
+        ) as any[];
+        console.log(`[plaid-link] token exists ignoring expiry: ${anySession.length > 0}`, anySession[0] || "not found");
+        return res.status(400).send("Session expired or invalid. Please return to the app and try again.");
+      }
+
+      const { link_token, user_id } = sessions[0];
+
+    res.setHeader("Content-Security-Policy", [
+      "default-src 'self'",
+      "script-src 'self' https://cdn.plaid.com 'unsafe-inline'",
+      "frame-src https://*.plaid.com https://plaid.com",
+      "connect-src 'self' https://*.plaid.com https://plaid.com",
+      "img-src 'self' https://*.plaid.com data:",
+      "style-src 'self' 'unsafe-inline'",
+    ].join("; "));
     res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -383,20 +636,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
   <div class="status" id="status"></div>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
   <script>
+    const SESSION_TOKEN = ${JSON.stringify(session)};
+    const LINK_TOKEN = ${JSON.stringify(link_token)};
     let handler;
     function openPlaid() {
       if (!handler) {
         document.getElementById('status').textContent = 'Initializing...';
         handler = Plaid.create({
-          token: '${token}',
+          token: LINK_TOKEN,
           onSuccess: async function(public_token, metadata) {
             document.getElementById('status').textContent = 'Connecting your accounts...';
             document.getElementById('connectBtn').disabled = true;
             try {
-              const resp = await fetch('/api/plaid/exchange-token', {
+              const resp = await fetch('/api/plaid/exchange-token-session', {
                 method: 'POST',
-                headers: {'Content-Type':'application/json','Authorization':'Bearer ${authToken}'},
-                body: JSON.stringify({public_token, institution_name: metadata.institution?.name})
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({
+                  session_token: SESSION_TOKEN,
+                  public_token,
+                  institution_name: metadata.institution?.name
+                })
               });
               const data = await resp.json();
               if (data.success) {
@@ -416,9 +675,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             if (err) document.getElementById('status').textContent = 'Cancelled.';
             document.getElementById('connectBtn').disabled = false;
           },
-          onLoad: function() {
-            document.getElementById('status').textContent = '';
-          }
+          onLoad: function() { document.getElementById('status').textContent = ''; }
         });
       }
       handler.open();
@@ -427,9 +684,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
   </script>
 </body>
 </html>`);
+    } catch (err: any) {
+      console.error("[plaid-link] unexpected error:", err?.message || err);
+      res.status(500).send("An unexpected error occurred. Check server logs.");
+    }
   });
 
-  app.get("/plaid-done", (req, res) => {
+  // Exchange token via session (no JWT in URL needed)
+  app.post("/api/plaid/exchange-token-session", plaidLimiter, async (req, res) => {
+    if (!plaidClient) return res.status(503).json({ error: "Plaid not configured" });
+    try {
+      const { session_token, public_token, institution_name } = req.body;
+      if (!session_token || !public_token) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+
+      // Validate and consume session token (single-use)
+      const sessions = await query(
+        "SELECT * FROM thrive_plaid_sessions WHERE token = $1 AND expires_at > NOW()",
+        [session_token]
+      ) as any[];
+
+      if (sessions.length === 0) {
+        return res.status(401).json({ error: "Invalid or expired session" });
+      }
+
+      const userId = sessions[0].user_id;
+
+      // Invalidate session immediately (single-use)
+      await query("DELETE FROM thrive_plaid_sessions WHERE token = $1", [session_token]);
+
+      const exchangeResp = await plaidClient.itemPublicTokenExchange({ public_token });
+      const { access_token, item_id } = exchangeResp.data;
+
+      const encryptedToken = encryptToken(access_token);
+      await query(
+        "INSERT INTO thrive_plaid_items (user_id, access_token, item_id, institution_name) VALUES ($1,$2,$3,$4)",
+        [userId, encryptedToken, item_id, institution_name || "Connected Bank"]
+      );
+
+      const accountsResp = await plaidClient.accountsGet({ access_token });
+      const plaidAccounts = accountsResp.data.accounts;
+
+      for (const acc of plaidAccounts) {
+        const id = `plaid_${acc.account_id}`;
+        const type = mapPlaidType(acc.type, acc.subtype);
+        const balance = acc.balances.current ?? 0;
+        await query(
+          `INSERT INTO thrive_accounts (id, user_id, name, institution, type, balance, color, plaid_account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (id) DO UPDATE SET balance=$6, last_updated=NOW()`,
+          [id, userId, acc.name, institution_name || "Bank", type, balance, typeColor(type), acc.account_id]
+        );
+      }
+
+      res.json({ success: true, accounts_synced: plaidAccounts.length });
+    } catch (err: any) {
+      console.error("Plaid session exchange error:", err?.response?.data?.error_code || "unknown");
+      res.status(500).json({ error: "Failed to exchange Plaid token" });
+    }
+  });
+
+  app.get("/plaid-done", (_req, res) => {
     res.send(`<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"/><title>Connected — Thrive</title>
@@ -439,21 +755,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
 </html>`);
   });
 
-  // ── AI Chat ───────────────────────────────────────────────────────────────
+  // ── AI Chat — authenticated + rate limited ────────────────────────────────
 
-  app.post("/api/chat", async (req, res) => {
+  app.post("/api/chat", authMiddleware, chatLimiter, async (req: any, res) => {
     try {
       const { messages } = req.body;
+      if (!Array.isArray(messages) || messages.length > 50) {
+        return res.status(400).json({ error: "Invalid messages" });
+      }
+
+      // Strip any system messages injected by client
+      const sanitized = messages
+        .filter((m: any) => m.role === "user" || m.role === "assistant")
+        .slice(-20) // only last 20 messages for context window safety
+        .map((m: any) => ({
+          role: m.role as "user" | "assistant",
+          content: typeof m.content === "string" ? m.content.slice(0, 4000) : "",
+        }));
+
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("X-Accel-Buffering", "no");
       res.flushHeaders();
 
       const stream = await openai.chat.completions.create({
-        model: "gpt-5.2",
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+        model: "gpt-4o",
+        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...sanitized],
         stream: true,
-        max_completion_tokens: 8192,
+        max_completion_tokens: 1024,
       });
 
       for await (const chunk of stream) {
@@ -463,7 +792,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.write("data: [DONE]\n\n");
       res.end();
     } catch (error) {
-      console.error("Chat error:", error);
+      console.error("Chat error");
       if (!res.headersSent) res.status(500).json({ error: "Chat failed" });
       else { res.write(`data: ${JSON.stringify({ error: "Chat failed" })}\n\n`); res.end(); }
     }
@@ -492,12 +821,139 @@ function typeColor(type: string): string {
   return colors[type] || "#00D4A0";
 }
 
-function mapPlaidCategory(cat: string): string {
-  const map: Record<string, string> = {
-    FOOD_AND_DRINK: "Dining", GROCERIES: "Groceries", TRANSPORTATION: "Transport",
-    ENTERTAINMENT: "Entertainment", SHOPPING: "Shopping", UTILITIES: "Utilities",
-    HEALTH_WELLNESS: "Health", INCOME: "Income", TRANSFER_IN: "Income",
-    TRAVEL: "Travel", RENT: "Housing", HOME_IMPROVEMENT: "Housing",
+function mapPlaidCategory(primary: string, detailed?: string): string {
+  // First try detailed category for more precision
+  if (detailed) {
+    const detailedMap: Record<string, string> = {
+      // Food & Drink
+      "FOOD_AND_DRINK_BEER_WINE_LIQUOR": "Alcohol",
+      "FOOD_AND_DRINK_COFFEE": "Coffee",
+      "FOOD_AND_DRINK_FAST_FOOD": "Dining",
+      "FOOD_AND_DRINK_GROCERIES": "Groceries",
+      "FOOD_AND_DRINK_RESTAURANT": "Dining",
+      "FOOD_AND_DRINK_VENDING_MACHINES": "Dining",
+      // Transport
+      "TRANSPORTATION_GAS": "Transport",
+      "TRANSPORTATION_PARKING": "Transport",
+      "TRANSPORTATION_PUBLIC_TRANSIT": "Transport",
+      "TRANSPORTATION_TAXIS": "Transport",
+      "TRANSPORTATION_RIDE_SHARE": "Transport",
+      "TRANSPORTATION_CAR_SERVICE": "Transport",
+      // Shopping
+      "GENERAL_MERCHANDISE_CLOTHING_AND_ACCESSORIES": "Clothing",
+      "GENERAL_MERCHANDISE_DEPARTMENT_STORES": "Shopping",
+      "GENERAL_MERCHANDISE_DISCOUNT_STORES": "Shopping",
+      "GENERAL_MERCHANDISE_ELECTRONICS": "Electronics",
+      "GENERAL_MERCHANDISE_ONLINE_MARKETPLACES": "Shopping",
+      "GENERAL_MERCHANDISE_PET_SUPPLIES": "Pets",
+      "GENERAL_MERCHANDISE_SPORTING_GOODS": "Fitness",
+      "GENERAL_MERCHANDISE_SUPERSTORES": "Shopping",
+      // Health
+      "MEDICAL_DOCTOR_VISITS": "Health",
+      "MEDICAL_DENTIST": "Health",
+      "MEDICAL_EYE_CARE": "Health",
+      "MEDICAL_PHARMACY": "Health",
+      "MEDICAL_VETERINARY": "Pets",
+      // Personal care
+      "PERSONAL_CARE_HAIR_SALONS": "Personal Care",
+      "PERSONAL_CARE_GYMS_AND_FITNESS": "Fitness",
+      "PERSONAL_CARE_SPA_AND_MASSAGE": "Personal Care",
+      // Entertainment
+      "ENTERTAINMENT_CASINOS_AND_GAMBLING": "Entertainment",
+      "ENTERTAINMENT_MUSIC_AND_AUDIO": "Subscriptions",
+      "ENTERTAINMENT_SPORTING_EVENTS": "Entertainment",
+      "ENTERTAINMENT_TV_AND_MOVIES": "Subscriptions",
+      "ENTERTAINMENT_VIDEO_GAMES": "Entertainment",
+      // Bills & Utilities
+      "RENT_AND_UTILITIES_ELECTRICITY": "Utilities",
+      "RENT_AND_UTILITIES_GAS": "Utilities",
+      "RENT_AND_UTILITIES_INTERNET_AND_CABLE": "Utilities",
+      "RENT_AND_UTILITIES_TELEPHONE": "Utilities",
+      "RENT_AND_UTILITIES_WATER": "Utilities",
+      "RENT_AND_UTILITIES_RENT": "Housing",
+      // Home
+      "HOME_IMPROVEMENT_FURNITURE": "Shopping",
+      "HOME_IMPROVEMENT_HARDWARE": "Shopping",
+      "HOME_IMPROVEMENT_HOME_SERVICES": "Housing",
+      // Income
+      "INCOME_DIVIDENDS": "Income",
+      "INCOME_INTEREST_EARNED": "Income",
+      "INCOME_RETIREMENT_PENSION": "Income",
+      "INCOME_TAX_REFUND": "Income",
+      "INCOME_WAGES": "Income",
+      "INCOME_OTHER_INCOME": "Income",
+      // Transfer
+      "TRANSFER_IN_CASH_ADVANCES_AND_LOANS": "Income",
+      "TRANSFER_IN_DEPOSIT": "Income",
+      "TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS": "Investments",
+      "TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS": "Investments",
+      // Loan & insurance
+      "LOAN_PAYMENTS_CAR_PAYMENT": "Transport",
+      "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT": "Other",
+      "LOAN_PAYMENTS_MORTGAGE_PAYMENT": "Housing",
+      "LOAN_PAYMENTS_STUDENT_LOAN": "Education",
+      "INSURANCE_AUTO_INSURANCE": "Insurance",
+      "INSURANCE_HEALTH_INSURANCE": "Insurance",
+      "INSURANCE_HOME_INSURANCE": "Insurance",
+      "INSURANCE_LIFE_INSURANCE": "Insurance",
+      // Travel
+      "TRAVEL_FLIGHTS": "Travel",
+      "TRAVEL_HOTELS_AND_MOTELS": "Travel",
+      "TRAVEL_RENTAL_CARS": "Travel",
+      "TRAVEL_VACATION_RENTALS": "Travel",
+      // Government & taxes
+      "GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT": "Taxes",
+      // Education
+      "EDUCATION_COLLEGE_TUITION": "Education",
+      "EDUCATION_BOOKS_AND_SUPPLIES": "Education",
+    };
+    const detailedKey = detailed.toUpperCase().replace(/ /g, "_");
+    if (detailedMap[detailedKey]) return detailedMap[detailedKey];
+  }
+
+  // Fall back to primary category mapping
+  const primaryMap: Record<string, string> = {
+    // Plaid primary categories (new personal_finance_category format)
+    "FOOD_AND_DRINK": "Dining",
+    "GROCERIES": "Groceries",
+    "TRANSPORTATION": "Transport",
+    "TRAVEL": "Travel",
+    "ENTERTAINMENT": "Entertainment",
+    "GENERAL_MERCHANDISE": "Shopping",
+    "CLOTHING_AND_ACCESSORIES": "Clothing",
+    "PERSONAL_CARE": "Personal Care",
+    "MEDICAL": "Health",
+    "HEALTH_WELLNESS": "Health",
+    "RENT_AND_UTILITIES": "Utilities",
+    "HOME_IMPROVEMENT": "Housing",
+    "INCOME": "Income",
+    "TRANSFER_IN": "Income",
+    "TRANSFER_OUT": "Other",
+    "LOAN_PAYMENTS": "Housing",
+    "INSURANCE": "Insurance",
+    "GOVERNMENT_AND_NON_PROFIT": "Taxes",
+    "EDUCATION": "Education",
+    "GENERAL_SERVICES": "Other",
+    "BANK_FEES": "Other",
+    "ENTERTAINMENT_AND_RECREATION": "Entertainment",
+
+    // Legacy Plaid category array format (tx.category[0])
+    "Food and Drink": "Dining",
+    "Shops": "Shopping",
+    "Travel": "Travel",
+    "Recreation": "Entertainment",
+    "Healthcare": "Health",
+    "Service": "Other",
+    "Community": "Other",
+    "Bank Fees": "Other",
+    "Cash Advance": "Other",
+    "Interest": "Other",
+    "Payment": "Other",
+    "Tax": "Taxes",
+    "Transfer": "Other",
+    "Deposit": "Income",
   };
-  return map[cat] || "Other";
+
+  const key = primary?.trim();
+  return primaryMap[key] || "Other";
 }
