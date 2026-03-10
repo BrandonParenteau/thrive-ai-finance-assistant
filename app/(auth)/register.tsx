@@ -21,7 +21,7 @@ const C = Colors.dark;
 export default function RegisterScreen() {
   const insets = useSafeAreaInsets();
   const { register } = useAuth();
-  const { signInWithGoogle, signInWithApple, isAppleAvailable, googleRequest, loading: socialLoading, error: socialError } = useSocialAuth();
+  const { signInWithGoogle, signInWithApple, isAppleAvailable, isGoogleAvailable, googleRequest, loading: socialLoading, error: socialError } = useSocialAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -147,14 +147,16 @@ export default function RegisterScreen() {
 
         {socialError ? <Text style={styles.errorText}>{socialError}</Text> : null}
 
-        <Pressable
-          style={[styles.socialBtn, (socialLoading || !googleRequest) && styles.primaryBtnDisabled]}
-          onPress={signInWithGoogle}
-          disabled={socialLoading || !googleRequest}
-        >
-          <Ionicons name="logo-google" size={20} color={C.text} />
-          <Text style={styles.socialBtnText}>Continue with Google</Text>
-        </Pressable>
+        {isGoogleAvailable && (
+          <Pressable
+            style={[styles.socialBtn, (socialLoading || !googleRequest) && styles.primaryBtnDisabled]}
+            onPress={signInWithGoogle}
+            disabled={socialLoading || !googleRequest}
+          >
+            <Ionicons name="logo-google" size={20} color={C.text} />
+            <Text style={styles.socialBtnText}>Continue with Google</Text>
+          </Pressable>
+        )}
 
         {isAppleAvailable && (
           <Pressable
