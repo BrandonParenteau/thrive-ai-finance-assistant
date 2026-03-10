@@ -29,9 +29,9 @@ export function useSocialAuth() {
   );
 
   const [request, response, promptGoogleAsync] = Google.useAuthRequest({
-    iosClientId: iosClientId ?? "not-configured",
-    androidClientId: androidClientId ?? "not-configured",
-    webClientId: webClientId ?? "not-configured",
+    iosClientId: iosClientId || "not-configured",
+    androidClientId: androidClientId || "not-configured",
+    webClientId: webClientId || "not-configured",
   });
 
   useEffect(() => {
