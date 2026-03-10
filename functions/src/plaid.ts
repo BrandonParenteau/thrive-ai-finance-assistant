@@ -475,52 +475,63 @@ export const plaidExchangeToken = onRequest(
       await batch.commit();
 
       // Sync last 90 days of transactions
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - 90);
-      let offset = 0;
-      const count = 250;
       let totalInserted = 0;
+      try {
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - 90);
+        let offset = 0;
+        const count = 250;
 
-      while (true) {
-        const txResp = await plaid.transactionsGet({
-          access_token,
-          start_date: startDate.toISOString().split("T")[0],
-          end_date: new Date().toISOString().split("T")[0],
-          options: { count, offset },
-        });
+        while (true) {
+          const txResp = await plaid.transactionsGet({
+            access_token,
+            start_date: startDate.toISOString().split("T")[0],
+            end_date: new Date().toISOString().split("T")[0],
+            options: { count, offset },
+          });
 
-        const { transactions, total_transactions } = txResp.data;
-        const txBatch = db.batch();
+          const { transactions, total_transactions } = txResp.data;
+          const txBatch = db.batch();
 
-        for (const tx of transactions) {
-          const amount = tx.amount * -1; // Plaid: positive = debit; flip for our convention
-          const primary = (tx.personal_finance_category as any)?.primary || (tx.category as string[] | null)?.[0] || "Other";
-          const detailed = (tx.personal_finance_category as any)?.detailed || (tx.category as string[] | null)?.[1] || "";
-          const category = mapPlaidCategory(primary, detailed);
+          for (const tx of transactions) {
+            const amount = tx.amount * -1; // Plaid: positive = debit; flip for our convention
+            const primary = (tx.personal_finance_category as any)?.primary || (tx.category as string[] | null)?.[0] || "Other";
+            const detailed = (tx.personal_finance_category as any)?.detailed || (tx.category as string[] | null)?.[1] || "";
+            const category = mapPlaidCategory(primary, detailed);
 
-          const txRef = db.collection("users").doc(uid).collection("transactions").doc(`plaid_tx_${tx.transaction_id}`);
-          txBatch.set(txRef, {
-            accountId: `plaid_${tx.account_id}`,
-            date: tx.date,
-            description: tx.name,
-            amount,
-            category,
-            merchant: tx.merchant_name || null,
-            plaid_transaction_id: tx.transaction_id,
-          }, { merge: true });
-          totalInserted++;
+            const txRef = db.collection("users").doc(uid).collection("transactions").doc(`plaid_tx_${tx.transaction_id}`);
+            txBatch.set(txRef, {
+              accountId: `plaid_${tx.account_id}`,
+              date: tx.date,
+              description: tx.name,
+              amount,
+              category,
+              merchant: tx.merchant_name || null,
+              plaid_transaction_id: tx.transaction_id,
+            }, { merge: true });
+            totalInserted++;
+          }
+
+          await txBatch.commit();
+          offset += transactions.length;
+          if (offset >= total_transactions) break;
         }
-
-        await txBatch.commit();
-        offset += transactions.length;
-        if (offset >= total_transactions) break;
+      } catch (txErr: any) {
+        if (txErr?.response?.data?.error_code === "PRODUCT_NOT_READY") {
+          // Accounts were synced; transactions will be available once the bank finishes syncing
+          console.log(`[plaidExchangeToken] uid=${uid} accounts=${plaidAccounts.length} transactions=pending`);
+          res.json({ success: true, accounts_synced: plaidAccounts.length, transactions_pending: true });
+          return;
+        }
+        throw txErr;
       }
 
       console.log(`[plaidExchangeToken] uid=${uid} accounts=${plaidAccounts.length} transactions=${totalInserted}`);
       res.json({ success: true, accounts_synced: plaidAccounts.length });
     } catch (err: any) {
-      console.error("plaidExchangeToken error:", err?.response?.data?.error_code || err?.message);
-      res.status(500).json({ error: "Failed to exchange Plaid token" });
+      const detail = err?.response?.data?.error_message || err?.message || "Unknown error";
+      console.error("plaidExchangeToken error:", err?.response?.data?.error_code || detail);
+      res.status(500).json({ error: "Failed to exchange Plaid token", detail });
     }
   }
 );
