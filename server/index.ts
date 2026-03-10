@@ -1,5 +1,7 @@
+import "dotenv/config";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
+import helmet from "helmet";
 import { registerRoutes } from "./routes";
 import * as fs from "fs";
 import * as path from "path";
@@ -29,18 +31,16 @@ function setupCors(app: express.Application) {
 
     const origin = req.header("origin");
 
-    // Allow localhost origins for Expo web development (any port)
+    // Only allow localhost in development
     const isLocalhost =
-      origin?.startsWith("http://localhost:") ||
-      origin?.startsWith("http://127.0.0.1:");
+      process.env.NODE_ENV !== "production" &&
+      (origin?.startsWith("http://localhost:") ||
+        origin?.startsWith("http://127.0.0.1:"));
 
     if (origin && (origins.has(origin) || isLocalhost)) {
       res.header("Access-Control-Allow-Origin", origin);
-      res.header(
-        "Access-Control-Allow-Methods",
-        "GET, POST, PUT, DELETE, OPTIONS",
-      );
-      res.header("Access-Control-Allow-Headers", "Content-Type");
+      res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+      res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
       res.header("Access-Control-Allow-Credentials", "true");
     }
 
@@ -80,9 +80,11 @@ function setupRequestLogging(app: express.Application) {
       if (!path.startsWith("/api")) return;
 
       const duration = Date.now() - start;
+      const REDACTED_PATHS = ["/api/auth/login", "/api/auth/register", "/api/plaid"];
+      const shouldRedact = REDACTED_PATHS.some((p) => path.startsWith(p));
 
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
+      if (capturedJsonResponse && !shouldRedact) {
         logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
       }
 
@@ -227,6 +229,21 @@ function setupErrorHandler(app: express.Application) {
 
 (async () => {
   setupCors(app);
+
+  // Security headers
+  app.use(helmet({
+    contentSecurityPolicy: false, // Managed per-route for Plaid page
+    crossOriginEmbedderPolicy: false,
+  }));
+
+  // HSTS in production
+  if (process.env.NODE_ENV === "production") {
+    app.use((_req, res, next) => {
+      res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+      next();
+    });
+  }
+
   setupBodyParsing(app);
   setupRequestLogging(app);
 
@@ -240,8 +257,7 @@ function setupErrorHandler(app: express.Application) {
   server.listen(
     {
       port,
-      host: "0.0.0.0",
-      reusePort: true,
+      host: "127.0.0.1",
     },
     () => {
       log(`express server serving on port ${port}`);

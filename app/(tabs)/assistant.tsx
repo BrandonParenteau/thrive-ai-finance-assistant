@@ -24,7 +24,8 @@ import Animated, {
 import { fetch } from "expo/fetch";
 import * as Haptics from "expo-haptics";
 import Colors from "@/constants/colors";
-import { getApiUrl } from "@/lib/query-client";
+import { getFunctionsUrl } from "@/lib/functions";
+import { useAuth } from "@/context/AuthContext";
 
 const C = Colors.dark;
 
@@ -128,6 +129,7 @@ function useTabBarHeight() {
 export default function AssistantScreen() {
   const insets = useSafeAreaInsets();
   const tabBarHeight = useTabBarHeight();
+  const { token } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -155,10 +157,13 @@ export default function AssistantScreen() {
         ...currentMessages.map((m) => ({ role: m.role, content: m.content })),
         { role: "user", content: trimmed },
       ];
-      const baseUrl = getApiUrl();
-      const response = await fetch(`${baseUrl}api/chat`, {
+      const response = await fetch(`${getFunctionsUrl()}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ messages: chatHistory }),
       });
       if (!response.ok) throw new Error("Request failed");
@@ -220,7 +225,7 @@ export default function AssistantScreen() {
   return (
     <View style={[styles.container, { paddingTop: topPad }]}>
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>AI Assistant</Text>
           <Text style={styles.headerSubtitle}>Canadian Finance Coach</Text>
         </View>
@@ -298,6 +303,7 @@ const styles = StyleSheet.create({
   statusDot: {
     flexDirection: "row", alignItems: "center", gap: 6,
     backgroundColor: `${C.positive}18`, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20,
+    flexShrink: 0,
   },
   onlineDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: C.positive },
   onlineText: { fontFamily: "DM_Sans_500Medium", fontSize: 12, color: C.positive },
@@ -321,7 +327,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14, paddingVertical: 14, borderWidth: 1, borderColor: C.border,
   },
   dot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: C.tint },
-  emptyState: { flex: 1, alignItems: "center", paddingTop: 40, paddingHorizontal: 16, gap: 12 },
+  emptyState: { flex: 1, alignItems: "center", paddingTop: 40, gap: 12 },
   emptyIcon: {
     width: 64, height: 64, borderRadius: 32,
     backgroundColor: `${C.tint}18`, alignItems: "center", justifyContent: "center",

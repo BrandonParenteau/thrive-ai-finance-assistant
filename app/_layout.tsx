@@ -19,42 +19,44 @@ import Colors from "@/constants/colors";
 
 SplashScreen.preventAutoHideAsync();
 
-function AuthGate() {
+// Merged into one component so it can access both fontsReady and auth state.
+// This lets us hold the splash screen until both are settled, preventing any
+// flash of the wrong screen when the app reopens with a persisted session.
+function RootLayoutNav({ fontsReady }: { fontsReady: boolean }) {
   const { user, token, isLoading } = useAuth();
   const segments = useSegments();
+  const ready = fontsReady && !isLoading;
 
+  // Hide splash only once fonts AND Firebase auth state are both resolved.
   useEffect(() => {
-    if (isLoading) return;
+    if (ready) SplashScreen.hideAsync();
+  }, [ready]);
+
+  // Redirect based on auth state, but only after everything is ready.
+  useEffect(() => {
+    if (!ready) return;
+
     const inAuth = segments[0] === "(auth)";
     const inOnboarding = segments[0] === "onboarding";
+
     if (!token) {
+      // Not logged in → login screen
       if (!inAuth) router.replace("/(auth)/login");
-    } else if (token && !user?.onboarding_complete) {
+    } else if (!user?.onboarding_complete) {
+      // Logged in but onboarding not done → onboarding
       if (!inOnboarding) router.replace("/onboarding/income");
-    } else if (token && user?.onboarding_complete) {
+    } else {
+      // Fully authenticated → main app
       if (inAuth || inOnboarding) router.replace("/(tabs)");
     }
-  }, [isLoading, token, user, segments]);
+  }, [ready, token, user, segments]);
 
-  return null;
-}
-
-function RootLayoutNav() {
   return (
-    <>
-      <AuthGate />
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen
-          name="(auth)"
-          options={{ presentation: "modal", headerShown: false }}
-        />
-        <Stack.Screen
-          name="onboarding"
-          options={{ presentation: "modal", headerShown: false }}
-        />
-      </Stack>
-    </>
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      <Stack.Screen name="(auth)" options={{ presentation: "modal", headerShown: false }} />
+      <Stack.Screen name="onboarding" options={{ presentation: "modal", headerShown: false }} />
+    </Stack>
   );
 }
 
@@ -66,11 +68,7 @@ export default function RootLayout() {
     "DM_Sans_700Bold": DMSans_700Bold,
   });
 
-  useEffect(() => {
-    if (fontsLoaded || fontError) {
-      SplashScreen.hideAsync();
-    }
-  }, [fontsLoaded, fontError]);
+  const fontsReady = fontsLoaded || !!fontError;
 
   return (
     <ErrorBoundary>
@@ -79,7 +77,7 @@ export default function RootLayout() {
           <FinanceProvider>
             <GestureHandlerRootView style={{ flex: 1, backgroundColor: Colors.dark.background }}>
               <KeyboardProvider>
-                <RootLayoutNav />
+                <RootLayoutNav fontsReady={fontsReady} />
               </KeyboardProvider>
             </GestureHandlerRootView>
           </FinanceProvider>

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   Modal,
   TextInput,
   Alert,
+  ActivityIndicator,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -20,8 +21,11 @@ import Animated, {
   FadeOut,
 } from "react-native-reanimated";
 import * as Haptics from "expo-haptics";
+import * as WebBrowser from "expo-web-browser";
 import Colors from "@/constants/colors";
 import { useFinance, Account } from "@/context/FinanceContext";
+import { useAuth } from "@/context/AuthContext";
+import { getFunctionsUrl } from "@/lib/functions";
 
 const C = Colors.dark;
 
@@ -122,7 +126,6 @@ function AddAccountModal({ visible, onClose }: { visible: boolean; onClose: () =
       institution,
       type: selectedType,
       balance: bal,
-      currency: "CAD",
       color: selectedColor,
     });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -227,8 +230,11 @@ function AddAccountModal({ visible, onClose }: { visible: boolean; onClose: () =
 
 export default function AccountsScreen() {
   const insets = useSafeAreaInsets();
-  const { accounts, removeAccount, totalAssets, totalLiabilities } = useFinance();
+  const { accounts, removeAccount, totalAssets, totalLiabilities, refreshAccounts } = useFinance();
+  const { token } = useAuth();
   const [showModal, setShowModal] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [connecting, setConnecting] = useState(false);
 
   const topPad = Platform.OS === "web" ? Math.max(insets.top, 67) : insets.top;
 
@@ -239,13 +245,59 @@ export default function AccountsScreen() {
     credit: accounts.filter((a) => a.type === "credit"),
   };
 
+  const handleSync = useCallback(async () => {
+    setSyncing(true);
+    try {
+      await fetch(`${getFunctionsUrl()}/plaidSyncTransactions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await refreshAccounts();
+      Alert.alert("Synced", "Transactions updated successfully.");
+    } catch (e) {
+      Alert.alert("Sync Failed", "Could not sync transactions.");
+    } finally {
+      setSyncing(false);
+    }
+  }, [token]);
+
+  const handleConnectPlaid = useCallback(async () => {
+    setConnecting(true);
+    try {
+      const base = getFunctionsUrl();
+      const resp = await fetch(`${base}/plaidLinkToken`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        Alert.alert("Error", data.error || "Could not start Plaid connection.");
+        return;
+      }
+      await WebBrowser.openBrowserAsync(`${base}/plaidLink?session=${encodeURIComponent(data.session_token)}`);
+      await refreshAccounts();
+      Alert.alert("Connected!", "Your bank account has been linked and transactions imported.");
+    } catch (err: any) {
+      Alert.alert("Connection Failed", err.message || "Unable to connect to Plaid.");
+    } finally {
+      setConnecting(false);
+    }
+  }, [token]);
+
   return (
     <View style={[styles.container, { paddingTop: topPad }]}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Accounts</Text>
-        <Pressable onPress={() => setShowModal(true)} style={styles.addBtnSmall}>
-          <Ionicons name="add" size={22} color={C.tint} />
-        </Pressable>
+        <View style={{ flexDirection: "row", gap: 10 }}>
+          <Pressable onPress={handleSync} disabled={syncing} style={styles.addBtnSmall}>
+            {syncing
+              ? <ActivityIndicator size="small" color={C.tint} />
+              : <Ionicons name="sync-outline" size={20} color={C.tint} />}
+          </Pressable>
+          <Pressable onPress={() => setShowModal(true)} style={styles.addBtnSmall}>
+            <Ionicons name="add" size={22} color={C.tint} />
+          </Pressable>
+        </View>
       </View>
 
       <ScrollView
@@ -259,12 +311,12 @@ export default function AccountsScreen() {
         <View style={styles.summaryRow}>
           <View style={styles.summaryStat}>
             <Text style={styles.summaryLabel}>Total Assets</Text>
-            <Text style={[styles.summaryValue, { color: C.positive }]}>{formatCAD(totalAssets)}</Text>
+            <Text style={[styles.summaryValue, { color: C.positive }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{formatCAD(totalAssets)}</Text>
           </View>
           <View style={styles.summaryDivider} />
           <View style={styles.summaryStat}>
             <Text style={styles.summaryLabel}>Liabilities</Text>
-            <Text style={[styles.summaryValue, { color: C.negative }]}>{formatCAD(totalLiabilities)}</Text>
+            <Text style={[styles.summaryValue, { color: C.negative }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{formatCAD(totalLiabilities)}</Text>
           </View>
         </View>
 
@@ -330,10 +382,24 @@ export default function AccountsScreen() {
           </View>
         )}
 
+        {/* Plaid Connect Button */}
+        <Pressable
+          onPress={handleConnectPlaid}
+          disabled={connecting}
+          style={[styles.plaidConnectBtn, connecting && { opacity: 0.6 }]}
+        >
+          {connecting
+            ? <ActivityIndicator color="#000" />
+            : <Ionicons name="link-outline" size={20} color="#000" />}
+          <Text style={styles.plaidConnectText}>
+            {connecting ? "Connecting..." : "Connect Bank with Plaid"}
+          </Text>
+        </Pressable>
+
         <View style={styles.tipCard}>
           <Ionicons name="information-circle-outline" size={18} color={C.tint} />
           <Text style={styles.tipText}>
-            Long-press any account to remove it. Tap the + to add a new account.
+            Long-press any account to remove it. Use + to add a manual account, or connect your bank with Plaid above.
           </Text>
         </View>
       </ScrollView>
@@ -410,6 +476,17 @@ const styles = StyleSheet.create({
   typeText: { fontFamily: "DM_Sans_700Bold", fontSize: 9, letterSpacing: 0.5 },
   balance: { fontFamily: "DM_Sans_700Bold", fontSize: 16, color: C.text },
   rowDivider: { height: 1, backgroundColor: C.border, marginHorizontal: 16 },
+  plaidConnectBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: C.tint,
+    borderRadius: 14,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+  },
+  plaidConnectText: { fontFamily: "DM_Sans_600SemiBold", fontSize: 16, color: "#000", flexShrink: 1 },
   tipCard: {
     flexDirection: "row", gap: 10,
     backgroundColor: `${C.tint}10`,

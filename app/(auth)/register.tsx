@@ -13,6 +13,7 @@ import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "@/context/AuthContext";
+import { useSocialAuth } from "@/hooks/useSocialAuth";
 import Colors from "@/constants/colors";
 
 const C = Colors.dark;
@@ -20,6 +21,7 @@ const C = Colors.dark;
 export default function RegisterScreen() {
   const insets = useSafeAreaInsets();
   const { register } = useAuth();
+  const { signInWithGoogle, signInWithApple, isAppleAvailable, googleRequest, loading: socialLoading, error: socialError } = useSocialAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -136,6 +138,34 @@ export default function RegisterScreen() {
             <Text style={styles.primaryBtnText}>Create Account</Text>
           )}
         </Pressable>
+
+        <View style={styles.dividerRow}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>or</Text>
+          <View style={styles.dividerLine} />
+        </View>
+
+        {socialError ? <Text style={styles.errorText}>{socialError}</Text> : null}
+
+        <Pressable
+          style={[styles.socialBtn, (socialLoading || !googleRequest) && styles.primaryBtnDisabled]}
+          onPress={signInWithGoogle}
+          disabled={socialLoading || !googleRequest}
+        >
+          <Ionicons name="logo-google" size={20} color={C.text} />
+          <Text style={styles.socialBtnText}>Continue with Google</Text>
+        </Pressable>
+
+        {isAppleAvailable && (
+          <Pressable
+            style={[styles.socialBtn, socialLoading && styles.primaryBtnDisabled]}
+            onPress={signInWithApple}
+            disabled={socialLoading}
+          >
+            <Ionicons name="logo-apple" size={22} color={C.text} />
+            <Text style={styles.socialBtnText}>Continue with Apple</Text>
+          </Pressable>
+        )}
       </View>
 
       <View style={styles.footer}>
@@ -190,4 +220,13 @@ const styles = StyleSheet.create({
   footer: { flexDirection: "row", justifyContent: "center", marginTop: 32 },
   footerText: { fontFamily: "DM_Sans_400Regular", fontSize: 14, color: C.textSecondary },
   footerLink: { fontFamily: "DM_Sans_600SemiBold", fontSize: 14, color: C.tint },
+  dividerRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 8 },
+  dividerLine: { flex: 1, height: 1, backgroundColor: C.border },
+  dividerText: { fontFamily: "DM_Sans_400Regular", fontSize: 13, color: C.textMuted },
+  socialBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
+    backgroundColor: C.card, borderRadius: 14, paddingVertical: 14,
+    borderWidth: 1, borderColor: C.border,
+  },
+  socialBtnText: { fontFamily: "DM_Sans_500Medium", fontSize: 15, color: C.text },
 });

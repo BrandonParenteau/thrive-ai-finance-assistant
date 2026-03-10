@@ -1,4 +1,3 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, {
   createContext,
   useContext,
@@ -8,7 +7,16 @@ import React, {
   useCallback,
   ReactNode,
 } from "react";
-import { getApiUrl } from "@/lib/query-client";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+} from "firebase/firestore";
+import { db } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 
 export interface Account {
@@ -43,6 +51,8 @@ interface FinanceContextValue {
   transactions: Transaction[];
   budgets: Budget[];
   monthlyIncome: number;
+  onboardingIncome: number;
+  hasPlaidConnection: boolean;
   addAccount: (account: Omit<Account, "id" | "lastUpdated" | "currency">) => Promise<void>;
   removeAccount: (id: string) => Promise<void>;
   addTransaction: (tx: Omit<Transaction, "id">) => Promise<void>;
@@ -59,48 +69,16 @@ interface FinanceContextValue {
 
 const FinanceContext = createContext<FinanceContextValue | null>(null);
 
-function normalizeAccount(row: any): Account {
-  return {
-    id: row.id,
-    name: row.name,
-    institution: row.institution,
-    type: row.type,
-    balance: parseFloat(row.balance),
-    currency: "CAD",
-    color: row.color,
-    lastUpdated: row.last_updated || new Date().toISOString(),
-  };
-}
-
-function normalizeTx(row: any): Transaction {
-  return {
-    id: row.id,
-    accountId: row.account_id || "",
-    date: typeof row.date === "string" ? row.date.split("T")[0] : new Date(row.date).toISOString().split("T")[0],
-    description: row.description,
-    amount: parseFloat(row.amount),
-    category: row.category,
-    merchant: row.merchant || undefined,
-  };
-}
-
 export function FinanceProvider({ children }: { children: ReactNode }) {
-  const { token, user } = useAuth();
+  const { user } = useAuth();
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [budgets, setBudgetsState] = useState<Budget[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  const apiHeaders = useCallback(() => ({
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  }), [token]);
-
-  const base = getApiUrl();
-
   const fetchAll = useCallback(async () => {
-    if (!token) {
+    if (!user) {
       setAccounts([]);
       setTransactions([]);
       setBudgetsState([]);
@@ -108,34 +86,54 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
       return;
     }
     try {
-      const [accResp, txResp, budResp] = await Promise.all([
-        fetch(`${base}api/accounts`, { headers: apiHeaders() }),
-        fetch(`${base}api/transactions`, { headers: apiHeaders() }),
-        fetch(`${base}api/budgets`, { headers: apiHeaders() }),
+      const userRef = doc(db, "users", user.id);
+      const [userSnap, accSnap, txSnap] = await Promise.all([
+        getDoc(userRef),
+        getDocs(collection(db, "users", user.id, "accounts")),
+        getDocs(collection(db, "users", user.id, "transactions")),
       ]);
-      if (accResp.ok) {
-        const data = await accResp.json();
-        setAccounts(data.map(normalizeAccount));
-      }
-      if (txResp.ok) {
-        const data = await txResp.json();
-        setTransactions(data.map(normalizeTx));
-      }
-      if (budResp.ok) {
-        const data = await budResp.json();
-        const cats = ["Groceries", "Dining", "Transport", "Entertainment", "Shopping", "Utilities", "Health"];
-        const serverBudgets: Budget[] = data.map((b: any) => ({
+
+      if (userSnap.exists()) {
+        const data = userSnap.data();
+        const firestoreBudgets: Budget[] = (data.budgets ?? []).map((b: any) => ({
           category: b.category,
-          limit: parseFloat(b.limit_amount),
+          limit: b.limit,
           spent: 0,
         }));
-        setBudgetsState(serverBudgets);
+        setBudgetsState(firestoreBudgets);
       }
+
+      setAccounts(accSnap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          name: data.name,
+          institution: data.institution,
+          type: data.type,
+          balance: data.balance,
+          currency: "CAD",
+          color: data.color,
+          lastUpdated: data.lastUpdated || new Date().toISOString(),
+        } as Account;
+      }));
+
+      setTransactions(txSnap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          accountId: data.accountId || "",
+          date: typeof data.date === "string" ? data.date.split("T")[0] : new Date(data.date).toISOString().split("T")[0],
+          description: data.description,
+          amount: data.amount,
+          category: data.category,
+          merchant: data.merchant || undefined,
+        } as Transaction;
+      }));
     } catch (err) {
       console.error("Failed to fetch finance data:", err);
     }
     setIsLoaded(true);
-  }, [token, base]);
+  }, [user]);
 
   useEffect(() => {
     setIsLoaded(false);
@@ -157,78 +155,67 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
   }, [budgets, transactions]);
 
   const addAccount = useCallback(async (account: Omit<Account, "id" | "lastUpdated" | "currency">) => {
-    const resp = await fetch(`${base}api/accounts`, {
-      method: "POST",
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        name: account.name,
-        institution: account.institution,
-        type: account.type,
-        balance: account.balance,
-        color: account.color,
-      }),
-    });
-    if (!resp.ok) throw new Error("Failed to add account");
-    const newAcc = await resp.json();
-    setAccounts((prev) => [...prev, normalizeAccount(newAcc)]);
-  }, [base, apiHeaders]);
+    if (!user) throw new Error("Not authenticated");
+    const data = {
+      name: account.name,
+      institution: account.institution,
+      type: account.type,
+      balance: account.balance,
+      color: account.color,
+      lastUpdated: new Date().toISOString(),
+    };
+    const ref = await addDoc(collection(db, "users", user.id, "accounts"), data);
+    setAccounts((prev) => [...prev, { ...data, id: ref.id, currency: "CAD" }]);
+  }, [user]);
 
   const removeAccount = useCallback(async (id: string) => {
-    await fetch(`${base}api/accounts/${id}`, { method: "DELETE", headers: apiHeaders() });
+    if (!user) throw new Error("Not authenticated");
+    await deleteDoc(doc(db, "users", user.id, "accounts", id));
     setAccounts((prev) => prev.filter((a) => a.id !== id));
-  }, [base, apiHeaders]);
+  }, [user]);
 
   const addTransaction = useCallback(async (tx: Omit<Transaction, "id">) => {
-    const resp = await fetch(`${base}api/transactions`, {
-      method: "POST",
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        account_id: tx.accountId || null,
-        date: tx.date,
-        description: tx.description,
-        amount: tx.amount,
-        category: tx.category,
-        merchant: tx.merchant || null,
-      }),
-    });
-    if (!resp.ok) throw new Error("Failed to add transaction");
-    const newTx = await resp.json();
-    setTransactions((prev) => [normalizeTx(newTx), ...prev]);
-  }, [base, apiHeaders]);
+    if (!user) throw new Error("Not authenticated");
+    const data = {
+      accountId: tx.accountId || null,
+      date: tx.date,
+      description: tx.description,
+      amount: tx.amount,
+      category: tx.category,
+      merchant: tx.merchant || null,
+    };
+    const ref = await addDoc(collection(db, "users", user.id, "transactions"), data);
+    setTransactions((prev) => [{ ...tx, id: ref.id }, ...prev]);
+  }, [user]);
 
   const updateTransaction = useCallback(async (id: string, updates: Partial<Omit<Transaction, "id">>) => {
+    if (!user) throw new Error("Not authenticated");
     const existing = transactions.find((t) => t.id === id);
     if (!existing) return;
     const merged = { ...existing, ...updates };
-    const resp = await fetch(`${base}api/transactions/${id}`, {
-      method: "PUT",
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        description: merged.description,
-        amount: merged.amount,
-        category: merged.category,
-        merchant: merged.merchant || null,
-        date: merged.date,
-      }),
+    await updateDoc(doc(db, "users", user.id, "transactions", id), {
+      description: merged.description,
+      amount: merged.amount,
+      category: merged.category,
+      merchant: merged.merchant || null,
+      date: merged.date,
     });
-    if (!resp.ok) throw new Error("Failed to update transaction");
-    const updated = await resp.json();
-    setTransactions((prev) => prev.map((t) => t.id === id ? normalizeTx(updated) : t));
-  }, [base, apiHeaders, transactions]);
+    setTransactions((prev) => prev.map((t) => t.id === id ? { ...merged } : t));
+  }, [user, transactions]);
 
   const deleteTransaction = useCallback(async (id: string) => {
-    await fetch(`${base}api/transactions/${id}`, { method: "DELETE", headers: apiHeaders() });
+    if (!user) throw new Error("Not authenticated");
+    await deleteDoc(doc(db, "users", user.id, "transactions", id));
     setTransactions((prev) => prev.filter((t) => t.id !== id));
-  }, [base, apiHeaders]);
+  }, [user]);
 
   const handleSetBudgets = useCallback(async (newBudgets: Budget[]) => {
-    await fetch(`${base}api/budgets`, {
-      method: "PUT",
-      headers: apiHeaders(),
-      body: JSON.stringify({ budgets: newBudgets.map((b) => ({ category: b.category, limit_amount: b.limit })) }),
+    if (!user) throw new Error("Not authenticated");
+    await updateDoc(doc(db, "users", user.id), {
+      budgets: newBudgets.map((b) => ({ category: b.category, limit: b.limit, spent: b.spent })),
     });
     setBudgetsState(newBudgets);
-  }, [base, apiHeaders]);
+  }, [user]);
 
   const refreshAccounts = useCallback(() => fetchAll(), [fetchAll]);
 
@@ -240,13 +227,18 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
   const cm = now.getMonth();
   const cy = now.getFullYear();
 
+  const onboardingIncome = user?.monthly_income ?? 0;
+  const hasPlaidConnection = accounts.length > 0;
+
   const monthlyIncome = useMemo(() => {
-    const serverIncome = user?.monthly_income ?? 0;
-    const txIncome = transactions
-      .filter((t) => { const d = new Date(t.date); return d.getMonth() === cm && d.getFullYear() === cy && t.amount > 0; })
-      .reduce((s, t) => s + t.amount, 0);
-    return serverIncome > 0 ? serverIncome : txIncome;
-  }, [transactions, user, cm, cy]);
+    if (hasPlaidConnection) {
+      const txIncome = transactions
+        .filter((t) => { const d = new Date(t.date); return d.getMonth() === cm && d.getFullYear() === cy && t.amount > 0; })
+        .reduce((s, t) => s + t.amount, 0);
+      return txIncome > 0 ? txIncome : onboardingIncome;
+    }
+    return onboardingIncome;
+  }, [transactions, onboardingIncome, hasPlaidConnection, cm, cy]);
 
   const monthlyExpenses = useMemo(() =>
     Math.abs(transactions
@@ -259,6 +251,8 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
     transactions,
     budgets: budgetsWithSpent,
     monthlyIncome,
+    onboardingIncome,
+    hasPlaidConnection,
     addAccount,
     removeAccount,
     addTransaction,
@@ -271,7 +265,7 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
     totalLiabilities,
     monthlyExpenses,
     isLoaded,
-  }), [accounts, transactions, budgetsWithSpent, monthlyIncome, addAccount, removeAccount, addTransaction, updateTransaction, deleteTransaction, handleSetBudgets, refreshAccounts, netWorth, totalAssets, totalLiabilities, monthlyExpenses, isLoaded]);
+  }), [accounts, transactions, budgetsWithSpent, monthlyIncome, onboardingIncome, hasPlaidConnection, addAccount, removeAccount, addTransaction, updateTransaction, deleteTransaction, handleSetBudgets, refreshAccounts, netWorth, totalAssets, totalLiabilities, monthlyExpenses, isLoaded]);
 
   return <FinanceContext.Provider value={value}>{children}</FinanceContext.Provider>;
 }

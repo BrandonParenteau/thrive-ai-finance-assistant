@@ -267,6 +267,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.put("/api/auth/password", authMiddleware, async (req: any, res) => {
+    try {
+      const { current_password, new_password } = req.body;
+      if (!current_password || !new_password) return res.status(400).json({ error: "Both current and new password are required" });
+      if (new_password.length < 8) return res.status(400).json({ error: "New password must be at least 8 characters" });
+
+      const users = await query("SELECT password_hash FROM thrive_users WHERE id = $1", [req.userId]);
+      if (users.length === 0) return res.status(404).json({ error: "User not found" });
+
+      const valid = await bcrypt.compare(current_password, (users[0] as any).password_hash);
+      if (!valid) return res.status(401).json({ error: "Current password is incorrect" });
+
+      const hash = await bcrypt.hash(new_password, 12);
+      await query("UPDATE thrive_users SET password_hash = $1 WHERE id = $2", [hash, req.userId]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Password change error");
+      res.status(500).json({ error: "Failed to change password" });
+    }
+  });
+
   // Account deletion — PIPEDA compliance
   app.delete("/api/auth/account", authMiddleware, async (req: any, res) => {
     try {
@@ -559,6 +580,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           offset += transactions.length;
           hasMore = offset < total_transactions;
         }
+
+        // Refresh account balances for this item
+        const accountsResp = await plaidClient.accountsGet({ access_token: accessToken });
+        for (const acc of accountsResp.data.accounts) {
+          const balance = acc.balances.current ?? 0;
+          await query(
+            `UPDATE thrive_accounts SET balance=$1, last_updated=NOW() WHERE plaid_account_id=$2 AND user_id=$3`,
+            [balance, acc.account_id, req.userId]
+          );
+        }
+        console.log(`[sync] balances refreshed for ${accountsResp.data.accounts.length} accounts`);
       }
 
       console.log(`[sync] complete — fetched=${totalSynced} inserted/updated=${totalInserted}`);

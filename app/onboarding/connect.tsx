@@ -15,7 +15,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as WebBrowser from "expo-web-browser";
 import { useAuth } from "@/context/AuthContext";
 import { useFinance } from "@/context/FinanceContext";
-import { getApiUrl } from "@/lib/query-client";
+import { getFunctionsUrl } from "@/lib/functions";
 import Colors from "@/constants/colors";
 
 const C = Colors.dark;
@@ -33,20 +33,17 @@ export default function ConnectScreen() {
   const handleConnectPlaid = async () => {
     setConnecting(true);
     try {
-      const base = getApiUrl();
-      const resp = await fetch(`${base}api/plaid/link-token`, {
+      const base = getFunctionsUrl();
+      const resp = await fetch(`${base}/plaidLinkToken`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       });
       const data = await resp.json();
       if (!resp.ok) {
-        Alert.alert("Plaid Not Configured", data.error || "Please set up Plaid credentials in your environment variables.");
+        Alert.alert("Error", data.error || "Could not start Plaid connection.");
         return;
       }
-      const linkToken = data.link_token;
-      const base2 = getApiUrl();
-      const plaidPageUrl = `${base2}plaid-link?token=${encodeURIComponent(linkToken)}&userId=me&authToken=${encodeURIComponent(token || "")}`;
-      const result = await WebBrowser.openBrowserAsync(plaidPageUrl);
+      await WebBrowser.openBrowserAsync(`${base}/plaidLink?session=${encodeURIComponent(data.session_token)}`);
       await refreshAccounts();
     } catch (err: any) {
       Alert.alert("Connection Failed", err.message || "Unable to connect to Plaid. Please try again.");

@@ -29,15 +29,24 @@ function formatCAD(amount: number, decimals = 0): string {
 const CATEGORY_ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
   Groceries: "basket-outline", Dining: "restaurant-outline", Transport: "car-outline",
   Entertainment: "film-outline", Shopping: "bag-outline", Utilities: "flash-outline",
-  Health: "medical-outline", Housing: "home-outline", Travel: "airplane-outline",
-  "Personal Care": "sparkles-outline", Subscriptions: "refresh-circle-outline", Savings: "wallet-outline",
+  Health: "medical-outline", Income: "arrow-down-circle-outline",
+  Housing: "home-outline", Travel: "airplane-outline", Other: "ellipse-outline",
+  Subscriptions: "refresh-circle-outline", "Personal Care": "sparkles-outline",
+  Education: "school-outline", Fitness: "barbell-outline", Coffee: "cafe-outline",
+  Insurance: "shield-outline", Investments: "trending-up-outline", Gifts: "gift-outline",
+  Pets: "paw-outline", Clothing: "shirt-outline", Electronics: "phone-portrait-outline",
+  Alcohol: "wine-outline", Childcare: "people-outline", Taxes: "document-text-outline",
 };
 
 const CATEGORY_COLORS: Record<string, string> = {
   Groceries: "#00D4A0", Dining: "#F5C842", Transport: "#56CFE1",
   Entertainment: "#C77DFF", Shopping: "#FF6B6B", Utilities: "#FFB347",
   Health: "#6EDDA0", Housing: "#FF8A65", Travel: "#80DEEA",
-  "Personal Care": "#F48FB1", Subscriptions: "#80CBC4", Savings: "#A5D6A7", Other: "#8DB89A",
+  "Personal Care": "#F48FB1", Subscriptions: "#80CBC4", Income: "#32C86E",
+  Coffee: "#D4A574", Education: "#4FC3F7", Fitness: "#AED581",
+  Insurance: "#90CAF9", Investments: "#FFD54F", Gifts: "#F06292",
+  Pets: "#FFCC80", Clothing: "#CE93D8", Electronics: "#80DEEA",
+  Alcohol: "#EF9A9A", Childcare: "#80CBC4", Taxes: "#B0BEC5", Other: "#8DB89A",
 };
 
 function BudgetBar({

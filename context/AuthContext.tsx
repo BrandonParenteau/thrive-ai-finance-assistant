@@ -1,6 +1,19 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { getApiUrl } from "@/lib/query-client";
+import {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onIdTokenChanged,
+  updatePassword,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
+  deleteUser,
+  signInWithCredential,
+  AuthCredential,
+  User as FirebaseUser,
+} from "firebase/auth";
+import { doc, getDoc, setDoc, updateDoc, deleteDoc } from "firebase/firestore";
+import { auth, db } from "@/lib/firebase";
 
 export interface AuthUser {
   id: string;
@@ -15,13 +28,26 @@ interface AuthContextValue {
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
+  loginWithCredential: (credential: AuthCredential) => Promise<void>;
   logout: () => Promise<void>;
   updateProfile: (data: Partial<Pick<AuthUser, "monthly_income" | "onboarding_complete">>) => Promise<void>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
+  deleteAccount: (password: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const AUTH_STORAGE_KEY = "thrive_auth";
+async function fetchUserProfile(uid: string): Promise<{ monthly_income: number; onboarding_complete: boolean }> {
+  const snap = await getDoc(doc(db, "users", uid));
+  if (snap.exists()) {
+    const data = snap.data();
+    return {
+      monthly_income: data.monthly_income ?? 0,
+      onboarding_complete: data.onboarding_complete ?? false,
+    };
+  }
+  return { monthly_income: 0, onboarding_complete: false };
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -29,76 +55,89 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const raw = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
-        if (raw) {
-          const { token: t, user: u } = JSON.parse(raw);
-          if (t && u) {
-            setToken(t);
-            setUser(u);
-          }
-        }
-      } catch {}
+    // onIdTokenChanged fires on sign-in, sign-out, and automatic token refresh (every hour).
+    const unsubscribe = onIdTokenChanged(auth, async (firebaseUser: FirebaseUser | null) => {
+      if (firebaseUser) {
+        const idToken = await firebaseUser.getIdToken();
+        setToken(idToken);
+        const profile = await fetchUserProfile(firebaseUser.uid);
+        setUser({
+          id: firebaseUser.uid,
+          email: firebaseUser.email ?? "",
+          monthly_income: profile.monthly_income,
+          onboarding_complete: profile.onboarding_complete,
+        });
+      } else {
+        setToken(null);
+        setUser(null);
+      }
       setIsLoading(false);
-    })();
+    });
+    return unsubscribe;
   }, []);
 
-  const persist = async (t: string, u: AuthUser) => {
-    await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ token: t, user: u }));
-  };
-
   const login = async (email: string, password: string) => {
-    const base = getApiUrl();
-    const resp = await fetch(`${base}api/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || "Login failed");
-    setToken(data.token);
-    setUser(data.user);
-    await persist(data.token, data.user);
+    await signInWithEmailAndPassword(auth, email, password);
+    // onIdTokenChanged listener handles updating user/token state.
   };
 
   const register = async (email: string, password: string) => {
-    const base = getApiUrl();
-    const resp = await fetch(`${base}api/auth/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+    const { user: firebaseUser } = await createUserWithEmailAndPassword(auth, email, password);
+    await setDoc(doc(db, "users", firebaseUser.uid), {
+      email: firebaseUser.email,
+      monthly_income: 0,
+      onboarding_complete: false,
+      created_at: new Date().toISOString(),
     });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || "Registration failed");
-    setToken(data.token);
-    setUser(data.user);
-    await persist(data.token, data.user);
+    // onIdTokenChanged listener handles updating user/token state.
+  };
+
+  const loginWithCredential = async (credential: AuthCredential) => {
+    const { user: firebaseUser } = await signInWithCredential(auth, credential);
+    // Create Firestore doc if this is a new social sign-in user
+    const snap = await getDoc(doc(db, "users", firebaseUser.uid));
+    if (!snap.exists()) {
+      await setDoc(doc(db, "users", firebaseUser.uid), {
+        email: firebaseUser.email ?? "",
+        monthly_income: 0,
+        onboarding_complete: false,
+        created_at: new Date().toISOString(),
+      });
+    }
+    // onIdTokenChanged listener handles updating user/token state.
   };
 
   const logout = async () => {
-    setToken(null);
-    setUser(null);
-    await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
+    await signOut(auth);
   };
 
   const updateProfile = async (updates: Partial<Pick<AuthUser, "monthly_income" | "onboarding_complete">>) => {
-    if (!token) throw new Error("Not authenticated");
-    const base = getApiUrl();
-    const resp = await fetch(`${base}api/auth/profile`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify(updates),
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || "Failed to update profile");
-    const updated = { ...user!, ...data };
-    setUser(updated);
-    if (token) await persist(token, updated);
+    const firebaseUser = auth.currentUser;
+    if (!firebaseUser) throw new Error("Not authenticated");
+    await updateDoc(doc(db, "users", firebaseUser.uid), updates);
+    setUser((prev) => (prev ? { ...prev, ...updates } : prev));
+  };
+
+  const changePassword = async (currentPassword: string, newPassword: string) => {
+    const firebaseUser = auth.currentUser;
+    if (!firebaseUser || !firebaseUser.email) throw new Error("Not authenticated");
+    const credential = EmailAuthProvider.credential(firebaseUser.email, currentPassword);
+    await reauthenticateWithCredential(firebaseUser, credential);
+    await updatePassword(firebaseUser, newPassword);
+  };
+
+  const deleteAccount = async (password: string) => {
+    const firebaseUser = auth.currentUser;
+    if (!firebaseUser || !firebaseUser.email) throw new Error("Not authenticated");
+    const credential = EmailAuthProvider.credential(firebaseUser.email, password);
+    await reauthenticateWithCredential(firebaseUser, credential);
+    await deleteDoc(doc(db, "users", firebaseUser.uid));
+    await deleteUser(firebaseUser);
+    // onIdTokenChanged listener clears user/token state.
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout, updateProfile }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, register, loginWithCredential, logout, updateProfile, changePassword, deleteAccount }}>
       {children}
     </AuthContext.Provider>
   );
