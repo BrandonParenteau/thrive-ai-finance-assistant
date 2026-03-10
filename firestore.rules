@@ -1,28 +1,120 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // --- Helper functions ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
 
-    // Users can read and write their own document and subcollections
+    // --- Users collection ---
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read: if isSignedIn();
+      allow create: if isOwner(userId);
 
+      // --- FIXED UPDATE logic ---
+      allow update: if isOwner(userId) && (
+        // Allow updating subscription fields
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'subscriptionActive',
+          'subscriptionCheckedAt'
+        ])
+        ||
+        // Allow updating other fields (but not subscription fields)
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'subscriptionActive',
+          'subscriptionCheckedAt'
+        ])
+      );
+
+      allow delete: if isOwner(userId);
+
+      // --- Savings Goals ---
+      match /savingsGoals/{goalId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Subscriptions ---
+      match /subscriptions/{subscriptionId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Manual Subscriptions ---
+      match /subscriptions_manual/{subscriptionId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Transactions ---
+      match /transactions/{transactionId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Accounts (Plaid + manual) ---
       match /accounts/{accountId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read, create, update, delete: if isOwner(userId);
       }
 
-      match /transactions/{txId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
-      }
-
-      // plaid_items written by Cloud Functions (admin SDK); owner can read
+      // --- Plaid items (encrypted access tokens — written by Cloud Functions only) ---
       match /plaid_items/{itemId} {
-        allow read: if request.auth != null && request.auth.uid == userId;
-        allow write: if false; // Cloud Functions only (admin SDK bypasses rules)
+        allow read: if isOwner(userId);
+        allow write: if false; // Cloud Functions admin SDK only
+      }
+
+      // --- Budget Categories ---
+      match /budgetCategories/{categoryId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Budget Goals ---
+      match /budgetGoals/{goalId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Net Worth Assets ---
+      match /networth_assets/{assetId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Net Worth Liabilities ---
+      match /networth_liabilities/{liabilityId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Net Worth Snapshots ---
+      match /networth_snapshots/{snapshotId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // --- Account Snapshots (Plaid historical data) ---
+      match /account_snapshots/{snapshotId} {
+        allow read, create, update, delete: if isOwner(userId);
       }
     }
 
-    // plaid_sessions: Cloud Functions only — no client access
+    // --- Plaid sessions: Cloud Functions only — no client access ---
     match /plaid_sessions/{sessionId} {
+      allow read, write: if false;
+    }
+
+    // --- Public posts ---
+    match /posts/{postId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if isSignedIn()
+        && resource.data.authorId == request.auth.uid;
+    }
+
+    // --- Protected collection ---
+    match /protected/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // --- Private (locked) collection ---
+    match /private/{docId} {
       allow read, write: if false;
     }
   }
