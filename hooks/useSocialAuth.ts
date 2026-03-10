@@ -13,10 +13,25 @@ export function useSocialAuth() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const iosClientId = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID;
+  const androidClientId = process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID;
+  const webClientId = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
+
+  // Google.useAuthRequest throws a render error if the platform-specific client ID
+  // is undefined. Pass a placeholder so the hook initialises safely; the button is
+  // hidden/disabled via isGoogleAvailable when credentials are not configured.
+  // In Expo Go the bundle ID is host.exp.Exponent, so native iOS/Android client IDs
+  // won't work — fall back to webClientId which drives a browser-based OAuth flow.
+  const isGoogleAvailable = !!(
+    (Platform.OS === "ios" && (iosClientId || webClientId)) ||
+    (Platform.OS === "android" && (androidClientId || webClientId)) ||
+    (Platform.OS === "web" && webClientId)
+  );
+
   const [request, response, promptGoogleAsync] = Google.useAuthRequest({
-    iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
-    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
-    webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+    iosClientId: iosClientId ?? "not-configured",
+    androidClientId: androidClientId ?? "not-configured",
+    webClientId: webClientId ?? "not-configured",
   });
 
   useEffect(() => {
@@ -68,6 +83,7 @@ export function useSocialAuth() {
     signInWithGoogle,
     signInWithApple,
     isAppleAvailable,
+    isGoogleAvailable,
     googleRequest: request,
     loading,
     error,

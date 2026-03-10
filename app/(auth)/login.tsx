@@ -22,7 +22,7 @@ const C = Colors.dark;
 export default function LoginScreen() {
   const insets = useSafeAreaInsets();
   const { login } = useAuth();
-  const { signInWithGoogle, signInWithApple, isAppleAvailable, googleRequest, loading: socialLoading, error: socialError, clearError: clearSocialError } = useSocialAuth();
+  const { signInWithGoogle, signInWithApple, isAppleAvailable, isGoogleAvailable, googleRequest, loading: socialLoading, error: socialError, clearError: clearSocialError } = useSocialAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -124,14 +124,16 @@ export default function LoginScreen() {
 
         {socialError ? <Text style={styles.errorText}>{socialError}</Text> : null}
 
-        <Pressable
-          style={[styles.socialBtn, (socialLoading || !googleRequest) && styles.primaryBtnDisabled]}
-          onPress={signInWithGoogle}
-          disabled={socialLoading || !googleRequest}
-        >
-          <Ionicons name="logo-google" size={20} color={C.text} />
-          <Text style={styles.socialBtnText}>Continue with Google</Text>
-        </Pressable>
+        {isGoogleAvailable && (
+          <Pressable
+            style={[styles.socialBtn, (socialLoading || !googleRequest) && styles.primaryBtnDisabled]}
+            onPress={signInWithGoogle}
+            disabled={socialLoading || !googleRequest}
+          >
+            <Ionicons name="logo-google" size={20} color={C.text} />
+            <Text style={styles.socialBtnText}>Continue with Google</Text>
+          </Pressable>
+        )}
 
         {isAppleAvailable && (
           <Pressable
