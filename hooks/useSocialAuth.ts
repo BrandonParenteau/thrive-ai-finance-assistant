@@ -20,9 +20,11 @@ export function useSocialAuth() {
   // Google.useAuthRequest throws a render error if the platform-specific client ID
   // is undefined. Pass a placeholder so the hook initialises safely; the button is
   // hidden/disabled via isGoogleAvailable when credentials are not configured.
+  // In Expo Go the bundle ID is host.exp.Exponent, so native iOS/Android client IDs
+  // won't work — fall back to webClientId which drives a browser-based OAuth flow.
   const isGoogleAvailable = !!(
-    (Platform.OS === "ios" && iosClientId) ||
-    (Platform.OS === "android" && androidClientId) ||
+    (Platform.OS === "ios" && (iosClientId || webClientId)) ||
+    (Platform.OS === "android" && (androidClientId || webClientId)) ||
     (Platform.OS === "web" && webClientId)
   );
 
