@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Platform } from "react-native";
 import * as Google from "expo-auth-session/providers/google";
+import { makeRedirectUri } from "expo-auth-session";
 import * as AppleAuthentication from "expo-apple-authentication";
 import { GoogleAuthProvider, OAuthProvider } from "firebase/auth";
 import * as WebBrowser from "expo-web-browser";
@@ -28,10 +29,16 @@ export function useSocialAuth() {
     (Platform.OS === "web" && webClientId)
   );
 
+  // Use Expo's auth proxy so the redirect URI is a stable https:// URL that
+  // Google Cloud Console accepts. The proxy URL is:
+  // https://auth.expo.io/@YOUR_EXPO_USERNAME/thrive-finance
+  const redirectUri = makeRedirectUri({ useProxy: true });
+
   const [request, response, promptGoogleAsync] = Google.useAuthRequest({
     iosClientId: iosClientId || "not-configured",
     androidClientId: androidClientId || "not-configured",
     webClientId: webClientId || "not-configured",
+    redirectUri,
   });
 
   useEffect(() => {
@@ -49,7 +56,7 @@ export function useSocialAuth() {
 
   const signInWithGoogle = async () => {
     setError("");
-    await promptGoogleAsync();
+    await promptGoogleAsync({ useProxy: true });
   };
 
   const signInWithApple = async () => {
