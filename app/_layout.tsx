@@ -1,8 +1,21 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Stack, router, useSegments } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
+import * as Notifications from "expo-notifications";
 import React, { useEffect, useRef, useState } from "react";
 import { Platform } from "react-native";
+
+// ─── Notification display behaviour ──────────────────────────────────────────
+// Show banner + play sound even when the app is in the foreground.
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -22,6 +35,8 @@ import Constants from "expo-constants";
 import Colors from "@/constants/colors";
 import { registerPaywallCallback } from "@/hooks/usePro";
 import PaywallModal from "@/components/PaywallModal";
+import MonthlySummaryModal from "@/components/MonthlySummaryModal";
+import { registerMonthlySummaryCallback, openMonthlySummary } from "@/utils/monthlySummaryState";
 
 SplashScreen.preventAutoHideAsync();
 
@@ -45,10 +60,33 @@ function RootLayoutNav({ fontsReady }: { fontsReady: boolean }) {
   const ready = fontsReady && !isLoading;
   const splashHidden = useRef(false);
   const [paywallOpen, setPaywallOpen] = useState(false);
+  const [monthlySummaryOpen, setMonthlySummaryOpen] = useState(false);
 
   // Register global paywall callback so usePro().openPaywall() works anywhere.
   useEffect(() => {
     registerPaywallCallback(() => setPaywallOpen(true));
+  }, []);
+
+  // Register global monthly summary callback so notification taps can open it.
+  useEffect(() => {
+    registerMonthlySummaryCallback(() => setMonthlySummaryOpen(true));
+  }, []);
+
+  // Navigate to the correct screen when the user taps a notification.
+  useEffect(() => {
+    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data ?? {};
+      // Monthly summary notification → open the in-app summary modal
+      if (data.type === "monthly_summary") {
+        openMonthlySummary();
+        return;
+      }
+      const screen = data.screen as string | undefined;
+      if (screen && typeof screen === "string") {
+        router.push(screen as any);
+      }
+    });
+    return () => sub.remove();
   }, []);
 
   // Initialize RevenueCat once the user is known.
@@ -107,6 +145,10 @@ function RootLayoutNav({ fontsReady }: { fontsReady: boolean }) {
         visible={paywallOpen}
         onClose={() => setPaywallOpen(false)}
         onSubscribed={() => setPaywallOpen(false)}
+      />
+      <MonthlySummaryModal
+        visible={monthlySummaryOpen}
+        onClose={() => setMonthlySummaryOpen(false)}
       />
       {/* Global toast + offline banner float above all screens */}
       <ToastContainer />

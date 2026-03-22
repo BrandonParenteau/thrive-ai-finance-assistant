@@ -11,3 +11,4 @@ export { revenuecatWebhook } from "./revenuecat";
 export { netWorthSnapshot } from "./netWorthSnapshot";
 export { scenarioSummary } from "./scenarioSummary";
 export { parseStatement } from "./parseStatement";
+export { monthlySummaryEmail } from "./monthlySummaryEmail";

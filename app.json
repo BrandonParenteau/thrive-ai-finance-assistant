@@ -15,16 +15,37 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.thrive.finance"
+      "bundleIdentifier": "com.thrive.finance",
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSFaceIDUsageDescription": "Thrive uses Face ID to securely unlock your financial data.",
+        "NSCameraUsageDescription": "Thrive uses the camera to scan financial documents.",
+        "NSPhotoLibraryUsageDescription": "Thrive accesses your photo library to import financial statements.",
+        "NSUserNotificationsUsageDescription": "Thrive sends you budget alerts, bill reminders, and your monthly financial summary."
+      },
+      "entitlements": {
+        "com.apple.developer.applesignin": ["Default"]
+      }
     },
     "android": {
       "package": "com.thrive.finance",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#0A1A12",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
-      }
+      },
+      "permissions": [
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE",
+        "android.permission.POST_NOTIFICATIONS"
+      ]
     },
     "web": {
       "favicon": "./assets/images/favicon.png"
@@ -33,16 +54,32 @@
       [
         "expo-router",
         {
-          "origin": "https://replit.com/"
+          "origin": "https://thethriveapp.net"
         }
       ],
       "expo-font",
       "expo-web-browser",
-      "expo-apple-authentication"
+      "expo-apple-authentication",
+      "expo-local-authentication",
+      [
+        "expo-notifications",
+        {
+          "color": "#00D4A0",
+          "defaultChannel": "default"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {
+        "origin": "https://thethriveapp.net"
+      },
+      "eas": {
+        "projectId": "fa95ee38-2bfa-4dee-9e4d-701129be8108"
+      }
     }
   }
 }

@@ -30,6 +30,8 @@ import { getFunctionsUrl } from "@/lib/functions";
 import { db } from "@/lib/firebase";
 import { usePro } from "@/hooks/usePro";
 import PaywallModal from "@/components/PaywallModal";
+import BudgetAlertsModal from "@/components/BudgetAlertsModal";
+import BillRemindersModal from "@/components/BillRemindersModal";
 import {
   PROVINCES,
   DEFAULT_TAX_PROFILE,
@@ -39,6 +41,10 @@ import {
 const C = Colors.dark;
 
 const APP_VERSION = Constants.expoConfig?.version ?? "1.0.0";
+
+// Replace with your real App Store numeric ID once the app is live in App Store Connect.
+// Leave as empty string until then — the "Rate Thrive" row will be hidden.
+const APP_STORE_ID = "6748838810";
 
 const NOTIF_KEYS = {
   budgetAlerts: "thrive_notif_budget_alerts",
@@ -435,6 +441,8 @@ export default function SettingsScreen() {
   // Modals
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [showDeleteAccount, setShowDeleteAccount] = useState(false);
+  const [showBudgetAlerts, setShowBudgetAlerts] = useState(false);
+  const [showBillReminders, setShowBillReminders] = useState(false);
 
   // Biometrics
   const [biometricSupported, setBiometricSupported] = useState(false);
@@ -530,7 +538,7 @@ export default function SettingsScreen() {
       if (status !== "granted") {
         Alert.alert(
           "Notifications Disabled",
-          "Enable notifications in Settings to receive alerts.",
+          "Please enable notifications in your device Settings to receive Thrive alerts.",
           [
             { text: "Cancel", style: "cancel" },
             { text: "Open Settings", onPress: () => Linking.openSettings() },
@@ -548,11 +556,26 @@ export default function SettingsScreen() {
     };
     setters[key](value);
     await AsyncStorage.setItem(NOTIF_KEYS[key], String(value));
-    if (key === "rrspDeadline" || key === "tfsaNewRoom") {
-      await scheduleTaxNotification(key, value);
+    await scheduleNotification(key, value);
+
+    // For monthly summary: persist flag + push token to Firestore so the Cloud Function knows
+    if (key === "monthlySummary" && user) {
+      try {
+        const updates: Record<string, any> = { monthly_summary_enabled: value };
+        if (value && Platform.OS !== "web") {
+          try {
+            const tokenData = await Notifications.getExpoPushTokenAsync({
+              projectId: Constants.expoConfig?.extra?.eas?.projectId,
+            });
+            updates.expo_push_token = tokenData.data;
+          } catch { /* non-critical */ }
+        }
+        await updateDoc(doc(db, "users", user.id), updates);
+      } catch { /* non-critical */ }
     }
+
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-  }, []);
+  }, [user]);
 
   const handleSignOut = useCallback(() => {
     Alert.alert("Sign Out", "Are you sure you want to sign out?", [
@@ -617,43 +640,213 @@ export default function SettingsScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   }, [user]);
 
-  const scheduleTaxNotification = useCallback(async (key: "rrspDeadline" | "tfsaNewRoom", enable: boolean) => {
+  /**
+   * Schedules (or cancels) the notification for the given toggle key.
+   * All notifications fire at a fixed future time and repeat on their cadence.
+   *
+   * Budget Alerts   — every Monday at 6 pm (weekly spending check-in)
+   * Monthly Summary — 1st of each month at 9 am
+   * Bill Reminders  — 25th of each month at 10 am
+   * RRSP Deadline   — Feb 14 each year at 9 am (2 weeks before March 1 deadline)
+   * TFSA / FHSA     — Jan 2 each year at 9 am (new contribution room)
+   */
+  const scheduleNotification = useCallback(async (key: keyof typeof NOTIF_KEYS, enable: boolean) => {
+    if (Platform.OS === "web") return; // Web push not supported via expo-notifications
     const notifId = `thrive_sched_${key}`;
-    if (!enable) {
-      await Notifications.cancelScheduledNotificationAsync(notifId).catch(() => {});
+
+    // Always cancel first so toggling off or re-enabling always starts fresh
+    await Notifications.cancelScheduledNotificationAsync(notifId).catch(() => {});
+    if (!enable) return;
+
+    const now = new Date();
+
+    try {
+      if (key === "budgetAlerts") {
+        // Weekly — every Monday at 6 pm
+        await Notifications.scheduleNotificationAsync({
+          identifier: notifId,
+          content: {
+            title: "Weekly Budget Check-In",
+            body: "How's your spending tracking this week? Open Thrive to review your budget progress.",
+            data: { screen: "/(tabs)/insights" },
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
+            weekday: 2, // 1 = Sunday … 7 = Saturday
+            hour: 18,
+            minute: 0,
+          },
+        });
+
+      } else if (key === "monthlySummary") {
+        // Monthly — 1st of each month at 9 am
+        await Notifications.scheduleNotificationAsync({
+          identifier: notifId,
+          content: {
+            title: "Your Monthly Financial Summary",
+            body: "A new month has started — see how your income, expenses, and net worth changed last month.",
+            data: { type: "monthly_summary" },
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+            day: 1,
+            hour: 9,
+            minute: 0,
+            repeats: true,
+          },
+        });
+
+      } else if (key === "billReminders") {
+        // Monthly — 25th of each month at 10 am
+        await Notifications.scheduleNotificationAsync({
+          identifier: notifId,
+          content: {
+            title: "Month-End Bills Coming Up",
+            body: "Bills are approaching — review your Thrive budget to make sure you're covered before month-end.",
+            data: { screen: "/(tabs)/insights" },
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+            day: 25,
+            hour: 10,
+            minute: 0,
+            repeats: true,
+          },
+        });
+
+      } else if (key === "rrspDeadline") {
+        // Yearly — Feb 14 at 9 am (2 weeks before the March 1 RRSP deadline)
+        // If we're already past Feb 14 this year, schedule for next year
+        const nextYear = (now.getMonth() > 1 || (now.getMonth() === 1 && now.getDate() >= 14))
+          ? now.getFullYear() + 1
+          : now.getFullYear();
+        await Notifications.scheduleNotificationAsync({
+          identifier: notifId,
+          content: {
+            title: "RRSP Deadline in 2 Weeks",
+            body: "The RRSP contribution deadline is March 1. Contributions reduce your taxable income — open Thrive to check your available room.",
+            data: { screen: "/(tabs)/settings" },
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+            year: nextYear,
+            month: 2,
+            day: 14,
+            hour: 9,
+            minute: 0,
+            repeats: true,
+          },
+        });
+
+      } else if (key === "tfsaNewRoom") {
+        // Yearly — Jan 2 at 9 am (new TFSA / FHSA contribution room opens)
+        const nextYear = (now.getMonth() > 0 || now.getDate() >= 2)
+          ? now.getFullYear() + 1
+          : now.getFullYear();
+        await Notifications.scheduleNotificationAsync({
+          identifier: notifId,
+          content: {
+            title: "New TFSA & FHSA Room Available",
+            body: "$7,000 of new TFSA contribution room is available today. Open Thrive to see your updated limits.",
+            data: { screen: "/(tabs)/settings" },
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+            year: nextYear,
+            month: 1,
+            day: 2,
+            hour: 9,
+            minute: 0,
+            repeats: true,
+          },
+        });
+      }
+    } catch {
+      // Scheduling failure is non-critical — toggle state is already saved
+    }
+  }, []);
+
+  const [testingNotifs, setTestingNotifs] = useState(false);
+
+  const handleTestNotifications = useCallback(async () => {
+    if (Platform.OS === "web") {
+      Alert.alert("Not Supported", "Push notifications are not available on web.");
       return;
     }
-    const now = new Date();
-    if (key === "rrspDeadline") {
-      // Feb 14 reminder each year (2 weeks before March 1 deadline)
-      const nextYear = now.getMonth() >= 1 ? now.getFullYear() + 1 : now.getFullYear();
-      await Notifications.scheduleNotificationAsync({
-        identifier: notifId,
-        content: {
-          title: "RRSP Deadline in 2 Weeks",
-          body: "March 2 is the RRSP contribution deadline. Contributions lower your taxable income — open Thrive to check your available room.",
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
-          year: nextYear, month: 2, day: 14, hour: 9, minute: 0,
-          repeats: true,
-        },
-      }).catch(() => {});
-    } else {
-      // Jan 2 reminder each year (TFSA/FHSA new room)
-      const nextYear = now.getMonth() >= 0 ? now.getFullYear() + 1 : now.getFullYear();
-      await Notifications.scheduleNotificationAsync({
-        identifier: notifId,
-        content: {
-          title: "New TFSA & FHSA Room Available",
-          body: `$7,000 of new TFSA contribution room is available today. Open Thrive to see your updated limits.`,
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
-          year: nextYear, month: 1, day: 2, hour: 9, minute: 0,
-          repeats: true,
-        },
-      }).catch(() => {});
+    const { status } = await Notifications.requestPermissionsAsync();
+    if (status !== "granted") {
+      Alert.alert(
+        "Notifications Disabled",
+        "Please enable notifications in your device Settings first.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Open Settings", onPress: () => Linking.openSettings() },
+        ]
+      );
+      return;
+    }
+
+    setTestingNotifs(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    const tests: Array<{ title: string; body: string; delay: number }> = [
+      {
+        title: "Weekly Budget Check-In",
+        body: "How's your spending tracking this week? Open Thrive to review your budget progress.",
+        delay: 3,
+      },
+      {
+        title: "Your Monthly Financial Summary",
+        body: "A new month has started — see how your income, expenses, and net worth changed last month.",
+        delay: 6,
+      },
+      {
+        title: "Month-End Bills Coming Up",
+        body: "Bills are approaching — review your Thrive budget to make sure you're covered before month-end.",
+        delay: 9,
+      },
+      {
+        title: "RRSP Deadline in 2 Weeks",
+        body: "The RRSP contribution deadline is March 1. Open Thrive to check your available room.",
+        delay: 12,
+      },
+      {
+        title: "New TFSA & FHSA Room Available",
+        body: "$7,000 of new TFSA contribution room is available today. Open Thrive to see your updated limits.",
+        delay: 15,
+      },
+    ];
+
+    try {
+      // Cancel any leftover test notifications from a previous run
+      const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+      await Promise.all(
+        scheduled
+          .filter((n) => n.identifier.startsWith("thrive_test_"))
+          .map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier))
+      );
+
+      // Schedule each one with a TIME_INTERVAL trigger so they fire in sequence
+      for (const t of tests) {
+        await Notifications.scheduleNotificationAsync({
+          identifier: `thrive_test_${t.delay}`,
+          content: { title: t.title, body: t.body, data: { screen: "/(tabs)" } },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            seconds: t.delay,
+            repeats: false,
+          },
+        });
+      }
+
+      Alert.alert(
+        "Test Notifications Sent",
+        "5 notifications will arrive over the next 15 seconds — one every 3 seconds.\n\nBackground the app now to see them as banners.",
+      );
+    } catch {
+      Alert.alert("Error", "Couldn't schedule test notifications. Please try again.");
+    } finally {
+      setTestingNotifs(false);
     }
   }, []);
 
@@ -874,15 +1067,8 @@ export default function SettingsScreen() {
           <SettingsRow
             icon="alert-circle-outline"
             label="Budget Alerts"
-            chevron={false}
-            rightElement={
-              <Switch
-                value={budgetAlerts}
-                onValueChange={(v) => handleNotifToggle("budgetAlerts", v)}
-                trackColor={{ false: C.border, true: `${C.tint}88` }}
-                thumbColor={budgetAlerts ? C.tint : C.textMuted}
-              />
-            }
+            value={budgetAlerts ? "On" : undefined}
+            onPress={() => setShowBudgetAlerts(true)}
           />
           <RowDivider />
           <SettingsRow
@@ -902,15 +1088,8 @@ export default function SettingsScreen() {
           <SettingsRow
             icon="notifications-outline"
             label="Bill Reminders"
-            chevron={false}
-            rightElement={
-              <Switch
-                value={billReminders}
-                onValueChange={(v) => handleNotifToggle("billReminders", v)}
-                trackColor={{ false: C.border, true: `${C.tint}88` }}
-                thumbColor={billReminders ? C.tint : C.textMuted}
-              />
-            }
+            value={billReminders ? "On" : undefined}
+            onPress={() => setShowBillReminders(true)}
           />
           <RowDivider />
           <SettingsRow
@@ -946,37 +1125,56 @@ export default function SettingsScreen() {
           />
         </Card>
 
+        {__DEV__ && (
+          <Pressable
+            onPress={handleTestNotifications}
+            disabled={testingNotifs}
+            style={({ pressed }) => [styles.testNotifBtn, (pressed || testingNotifs) && { opacity: 0.6 }]}
+          >
+            {testingNotifs
+              ? <ActivityIndicator size="small" color={C.tint} />
+              : <Ionicons name="flask-outline" size={16} color={C.tint} />}
+            <Text style={styles.testNotifText}>
+              {testingNotifs ? "Scheduling…" : "Test All Notifications"}
+            </Text>
+          </Pressable>
+        )}
+
         {/* ── Support ── */}
         <SectionHeader title="Support" />
         <Card>
           <SettingsRow
             icon="mail-outline"
             label="Contact Support"
-            onPress={() => Linking.openURL("mailto:support@thrive.finance?subject=Thrive%20Support")}
+            onPress={() => Linking.openURL("mailto:customerservice@thethriveapp.net?subject=Thrive%20Support")}
           />
-          <RowDivider />
-          <SettingsRow
-            icon="star-half-outline"
-            label="Rate Thrive"
-            onPress={() =>
-              Linking.openURL(
-                Platform.OS === "ios"
-                  ? "itms-apps://apps.apple.com/app/id000000000?action=write-review"
-                  : "market://details?id=com.thrive.finance"
-              )
-            }
-          />
+          {APP_STORE_ID ? (
+            <>
+              <RowDivider />
+              <SettingsRow
+                icon="star-half-outline"
+                label="Rate Thrive"
+                onPress={() =>
+                  Linking.openURL(
+                    Platform.OS === "ios"
+                      ? `itms-apps://apps.apple.com/app/id${APP_STORE_ID}?action=write-review`
+                      : "market://details?id=com.thrive.finance"
+                  )
+                }
+              />
+            </>
+          ) : null}
           <RowDivider />
           <SettingsRow
             icon="shield-outline"
             label="Privacy Policy"
-            onPress={() => Linking.openURL("https://thrive.finance/privacy")}
+            onPress={() => Linking.openURL("https://thethriveapp.net/privacy-policy.html")}
           />
           <RowDivider />
           <SettingsRow
             icon="document-text-outline"
             label="Terms of Service"
-            onPress={() => Linking.openURL("https://thrive.finance/terms")}
+            onPress={() => Linking.openURL("https://thethriveapp.net/terms.html")}
           />
         </Card>
 
@@ -1002,6 +1200,18 @@ export default function SettingsScreen() {
         onSave={handleSaveTaxProfile}
         onClose={() => setShowTaxProfile(false)}
       />
+      <BudgetAlertsModal visible={showBudgetAlerts} onClose={() => {
+        setShowBudgetAlerts(false);
+        // Mark budget alerts as enabled if user has created any alerts
+        setBudgetAlerts(true);
+        AsyncStorage.setItem(NOTIF_KEYS.budgetAlerts, "true");
+      }} />
+      <BillRemindersModal visible={showBillReminders} onClose={() => {
+        setShowBillReminders(false);
+        // Mark bill reminders as enabled since user manages them
+        setBillReminders(true);
+        AsyncStorage.setItem(NOTIF_KEYS.billReminders, "true");
+      }} />
     </View>
   );
 }
@@ -1160,6 +1370,24 @@ const styles = StyleSheet.create({
     fontFamily: "DM_Sans_600SemiBold",
     fontSize: 12,
     color: C.negative,
+  },
+
+  // Test notifications button
+  testNotifBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: 12,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: `${C.tint}30`,
+    borderStyle: "dashed",
+  },
+  testNotifText: {
+    fontFamily: "DM_Sans_500Medium",
+    fontSize: 14,
+    color: C.tint,
   },
 
   // Biometric hint

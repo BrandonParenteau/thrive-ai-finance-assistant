@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.parseStatement = exports.scenarioSummary = exports.netWorthSnapshot = exports.revenuecatWebhook = exports.plaidDone = exports.plaidSyncTransactions = exports.plaidExchangeToken = exports.plaidLink = exports.plaidLinkToken = exports.chat = void 0;
+exports.monthlySummaryEmail = exports.parseStatement = exports.scenarioSummary = exports.netWorthSnapshot = exports.revenuecatWebhook = exports.plaidDone = exports.plaidSyncTransactions = exports.plaidExchangeToken = exports.plaidLink = exports.plaidLinkToken = exports.chat = void 0;
 const admin = __importStar(require("firebase-admin"));
 // Initialize Firebase Admin once at module load
 if (!admin.apps.length) {
@@ -55,4 +55,6 @@ var scenarioSummary_1 = require("./scenarioSummary");
 Object.defineProperty(exports, "scenarioSummary", { enumerable: true, get: function () { return scenarioSummary_1.scenarioSummary; } });
 var parseStatement_1 = require("./parseStatement");
 Object.defineProperty(exports, "parseStatement", { enumerable: true, get: function () { return parseStatement_1.parseStatement; } });
+var monthlySummaryEmail_1 = require("./monthlySummaryEmail");
+Object.defineProperty(exports, "monthlySummaryEmail", { enumerable: true, get: function () { return monthlySummaryEmail_1.monthlySummaryEmail; } });
 //# sourceMappingURL=index.js.map

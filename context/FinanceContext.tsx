@@ -178,7 +178,7 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
       }));
 
       setBudgetItemsState(budgetItemsSnap.docs.map((d) => {
-        const data = d.data();
+        const data = d.data() as Record<string, any>;
         return {
           id: d.id,
           categoryId: data.categoryId ?? "",
