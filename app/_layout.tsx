@@ -5,17 +5,13 @@ import * as Notifications from "expo-notifications";
 import React, { useEffect, useRef, useState } from "react";
 import { Platform } from "react-native";
 
-// ─── Notification display behaviour ──────────────────────────────────────────
-// Show banner + play sound even when the app is in the foreground.
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
+// ─── Splash screen ────────────────────────────────────────────────────────────
+// expo-router 6+ calls SplashScreen.preventAutoHideAsync() internally via its
+// own entry point before this module evaluates. Calling it again here is a
+// duplicate void TurboModule invocation that throws
+// ObjCTurboModule::performVoidMethodInvocation under New Architecture.
+// We rely on the router's built-in call and only call hideAsync() when ready.
+
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -38,8 +34,6 @@ import PaywallModal from "@/components/PaywallModal";
 import MonthlySummaryModal from "@/components/MonthlySummaryModal";
 import { registerMonthlySummaryCallback, openMonthlySummary } from "@/utils/monthlySummaryState";
 
-SplashScreen.preventAutoHideAsync();
-
 // ─── Global unhandled-promise-rejection logger ────────────────────────────────
 // Catches promise rejections that escape component try/catch blocks so they
 // appear in logs rather than crashing the app silently.
@@ -61,6 +55,21 @@ function RootLayoutNav({ fontsReady }: { fontsReady: boolean }) {
   const splashHidden = useRef(false);
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [monthlySummaryOpen, setMonthlySummaryOpen] = useState(false);
+
+  // Register notification display behaviour once the module is ready.
+  // Must be inside a component (not module-level) to avoid calling the
+  // TurboModule before Fabric registers it under New Architecture.
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      }),
+    });
+  }, []);
 
   // Register global paywall callback so usePro().openPaywall() works anywhere.
   useEffect(() => {

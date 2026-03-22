@@ -14,9 +14,9 @@
       "backgroundColor": "#0A1A12"
     },
     "ios": {
-      "supportsTablet": false,
+      "supportsTablet": true,
       "bundleIdentifier": "com.brandonparenteau.Fortifyai",
-      "buildNumber": "1",
+      "buildNumber": "7",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSFaceIDUsageDescription": "Thrive uses Face ID to securely unlock your financial data.",
@@ -66,6 +66,15 @@
         {
           "color": "#00D4A0",
           "defaultChannel": "default"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#0A1A12"
         }
       ]
     ],

@@ -1,39 +1,14 @@
-import { isLiquidGlassAvailable } from "expo-glass-effect";
 import { Tabs } from "expo-router";
-import { NativeTabs, Icon, Label } from "expo-router/unstable-native-tabs";
 import { BlurView } from "expo-blur";
-import { Platform, StyleSheet, View, useColorScheme } from "react-native";
+import { Platform, StyleSheet, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import React from "react";
 import Colors from "@/constants/colors";
 
-function NativeTabLayout() {
-  return (
-    <NativeTabs>
-      <NativeTabs.Trigger name="index">
-        <Icon sf={{ default: "chart.pie", selected: "chart.pie.fill" }} />
-        <Label>Overview</Label>
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="accounts">
-        <Icon sf={{ default: "creditcard", selected: "creditcard.fill" }} />
-        <Label>Accounts</Label>
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="insights">
-        <Icon sf={{ default: "chart.bar", selected: "chart.bar.fill" }} />
-        <Label>Insights</Label>
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="assistant">
-        <Icon sf={{ default: "sparkles", selected: "sparkles" }} />
-        <Label>Assistant</Label>
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="settings">
-        <Icon sf={{ default: "gearshape", selected: "gearshape.fill" }} />
-        <Label>Settings</Label>
-      </NativeTabs.Trigger>
-    </NativeTabs>
-  );
-}
+// expo-router/unstable-native-tabs uses UITabBarController TurboModule calls at
+// module-evaluation time which throws ObjCTurboModule::performVoidMethodInvocation
+// before Fabric is ready under New Architecture. Removed until the API stabilises.
 
 function ClassicTabLayout() {
   const insets = useSafeAreaInsets();
@@ -117,8 +92,5 @@ function ClassicTabLayout() {
 }
 
 export default function TabLayout() {
-  if (isLiquidGlassAvailable()) {
-    return <NativeTabLayout />;
-  }
   return <ClassicTabLayout />;
 }

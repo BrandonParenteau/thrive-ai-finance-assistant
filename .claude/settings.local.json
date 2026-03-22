@@ -13,7 +13,9 @@
       "Bash(grep -r \"useKeyboardAnimation\\\\|useReanimatedKeyboardAnimation\" /Users/brandonparenteau/Downloads/Thrive-AI-Finance-Assistant/node_modules/react-native-keyboard-controller/src/ --include=\"*.ts\" --include=\"*.tsx\" -l 2>/dev/null | head -5)",
       "Bash(firebase deploy --only firestore:rules 2>&1)",
       "Bash(npm install react-native-purchases 2>&1 | tail -5)",
-      "Bash(npm run deploy:functions 2>&1)"
+      "Bash(npm run deploy:functions 2>&1)",
+      "Bash(cat /Users/brandonparenteau/Downloads/Thrive-AI-Finance-Assistant/patches/*.patch)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''version:'''', d.get\\(''''version''''\\)\\); print\\(''''codegenConfig:'''', json.dumps\\(d.get\\(''''codegenConfig'''',{}\\), indent=2\\)\\); print\\(''''peerDeps:'''', json.dumps\\(d.get\\(''''peerDependencies'''',{}\\), indent=2\\)\\)\")"
     ]
   }
 }
