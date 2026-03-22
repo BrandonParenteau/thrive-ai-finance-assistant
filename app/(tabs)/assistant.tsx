@@ -8,6 +8,7 @@ import {
   Pressable,
   Platform,
   ActivityIndicator,
+  Keyboard,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
@@ -26,13 +27,34 @@ import * as Haptics from "expo-haptics";
 import Colors from "@/constants/colors";
 import { getFunctionsUrl } from "@/lib/functions";
 import { useAuth } from "@/context/AuthContext";
+import { useFinance } from "@/context/FinanceContext";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { usePro } from "@/hooks/usePro";
+import toast from "@/utils/toast";
+import { AI_MESSAGES, NETWORK_MESSAGES } from "@/utils/errorMessages";
+import { setNetworkOffline, setNetworkOnline } from "@/hooks/useNetworkStatus";
 
 const C = Colors.dark;
+
+/** AI request timeout in milliseconds */
+const AI_TIMEOUT_MS = 30_000;
+
+interface BudgetItem { category: string; limit: number; }
+
+interface MessageAction {
+  type: "set_budgets";
+  budgets: BudgetItem[];
+  summary: string;
+  applied: boolean;
+}
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  action?: MessageAction;
+  isError?: boolean;
 }
 
 let msgCounter = 0;
@@ -42,13 +64,59 @@ function genId(): string {
 }
 
 const QUICK_PROMPTS = [
-  "How much TFSA room do I have?",
+  "How much did I spend this month?",
+  "What are my biggest spending categories?",
+  "Create a budget based on my transactions",
+  "Am I spending too much on dining out?",
   "Should I contribute to RRSP or TFSA?",
-  "Explain FHSA for first-time buyers",
-  "Best Canadian ETFs for beginners",
-  "How does CPP work?",
-  "What's a good savings rate?",
+  "How can I improve my savings rate?",
 ];
+
+const CATEGORY_ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
+  Groceries: "basket-outline",
+  Dining: "restaurant-outline",
+  Transport: "car-outline",
+  Shopping: "bag-outline",
+  Entertainment: "game-controller-outline",
+  Utilities: "flash-outline",
+  Housing: "home-outline",
+  Health: "heart-outline",
+  "Personal Care": "person-outline",
+  Subscriptions: "repeat-outline",
+  Savings: "save-outline",
+  Income: "trending-up-outline",
+  Travel: "airplane-outline",
+  Other: "ellipsis-horizontal-outline",
+};
+
+function BudgetActionCard({ action }: { action: MessageAction }) {
+  return (
+    <View style={styles.actionCard}>
+      <View style={styles.actionCardHeader}>
+        <View style={styles.actionCardBadge}>
+          <Ionicons name="checkmark-circle" size={15} color={C.tint} />
+          <Text style={styles.actionCardBadgeText}>Budget Applied</Text>
+        </View>
+      </View>
+      {action.summary ? (
+        <Text style={styles.actionCardSummary}>{action.summary}</Text>
+      ) : null}
+      <View style={styles.actionCardDivider} />
+      {action.budgets.map((b) => {
+        const icon = CATEGORY_ICONS[b.category] ?? "ellipsis-horizontal-outline";
+        return (
+          <View key={b.category} style={styles.actionBudgetRow}>
+            <View style={styles.actionBudgetIcon}>
+              <Ionicons name={icon} size={14} color={C.tint} />
+            </View>
+            <Text style={styles.actionBudgetCategory}>{b.category}</Text>
+            <Text style={styles.actionBudgetLimit}>${b.limit.toLocaleString()}/mo</Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
 
 function TypingDots() {
   const dot1 = useSharedValue(0);
@@ -78,20 +146,34 @@ function TypingDots() {
 
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user";
+  // Strip the financial context prefix from display
+  const displayContent = message.content.replace(/^\[FINANCIAL DATA\][\s\S]*?\[\/FINANCIAL DATA\]\n\n/, "");
+
   return (
     <Animated.View
       entering={FadeInDown.duration(200).springify()}
       style={[styles.bubbleContainer, isUser && styles.bubbleContainerUser]}
     >
       {!isUser && (
-        <View style={styles.avatarContainer}>
-          <Ionicons name="leaf" size={14} color={C.tint} />
+        <View style={[styles.avatarContainer, message.isError && styles.avatarError]}>
+          <Ionicons name={message.isError ? "alert-circle" : "leaf"} size={14} color={message.isError ? C.negative : C.tint} />
         </View>
       )}
-      <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant]}>
-        <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
-          {message.content}
-        </Text>
+      <View style={styles.bubbleColumn}>
+        {displayContent.length > 0 && (
+          <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant, message.isError && styles.bubbleErrorAssistant]}>
+            <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser, message.isError && styles.bubbleTextError]}>
+              {displayContent}
+            </Text>
+          </View>
+        )}
+        {message.action?.type === "set_budgets" && (
+          <BudgetActionCard action={message.action} />
+        )}
+        {/* Hallucination disclaimer for assistant messages with dollar amounts */}
+        {!isUser && !message.isError && displayContent.match(/\$[\d,]+/) && (
+          <Text style={styles.disclaimer}>{AI_MESSAGES.HALLUCINATION_DISCLAIMER}</Text>
+        )}
       </View>
     </Animated.View>
   );
@@ -103,9 +185,9 @@ function EmptyState({ onPrompt }: { onPrompt: (p: string) => void }) {
       <View style={styles.emptyIcon}>
         <Ionicons name="sparkles" size={32} color={C.tint} />
       </View>
-      <Text style={styles.emptyTitle}>Your Finance Coach</Text>
+      <Text style={styles.emptyTitle}>Your Finance Assistant</Text>
       <Text style={styles.emptySubtitle}>
-        Ask anything about Canadian personal finance — TFSAs, RRSPs, taxes, investing, and more.
+        Ask about your spending, or say "create a budget" and I'll build and apply one from your real transactions.
       </Text>
       <View style={styles.quickPromptsGrid}>
         {QUICK_PROMPTS.map((p) => (
@@ -116,6 +198,64 @@ function EmptyState({ onPrompt }: { onPrompt: (p: string) => void }) {
       </View>
     </View>
   );
+}
+
+const BUDGET_INTENT_KEYWORDS = [
+  "create budget", "make budget", "build budget", "set budget", "set up budget",
+  "create a budget", "make a budget", "build a budget", "set a budget",
+  "update budget", "update my budget", "change my budget", "adjust budget",
+  "new budget", "suggest a budget", "suggest budget", "recommend a budget",
+  "fix my budget", "redo my budget", "revise my budget",
+];
+
+function hasBudgetIntent(text: string): boolean {
+  const lower = text.toLowerCase();
+  return BUDGET_INTENT_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+function buildFinancialContext(
+  accounts: ReturnType<typeof useFinance>["accounts"],
+  transactions: ReturnType<typeof useFinance>["transactions"],
+  budgets: ReturnType<typeof useFinance>["budgets"],
+  monthlyIncome: number,
+  monthlyExpenses: number,
+  netWorth: number,
+  totalAssets: number,
+  totalLiabilities: number,
+): string {
+  const today = new Date();
+  const lines: string[] = [];
+
+  lines.push(`Today: ${today.toISOString().split("T")[0]}`);
+  lines.push(`Net worth: $${netWorth.toFixed(2)} CAD (Assets: $${totalAssets.toFixed(2)}, Liabilities: $${totalLiabilities.toFixed(2)})`);
+  lines.push(`This month — Income: $${monthlyIncome.toFixed(2)}, Expenses: $${monthlyExpenses.toFixed(2)}, Savings: $${(monthlyIncome - monthlyExpenses).toFixed(2)}`);
+
+  if (accounts.length > 0) {
+    lines.push("\nACCOUNTS:");
+    for (const a of accounts) {
+      lines.push(`  ${a.name} (${a.institution}, ${a.type}): $${a.balance.toFixed(2)}`);
+    }
+  }
+
+  if (budgets.length > 0) {
+    lines.push("\nCURRENT BUDGETS (this month):");
+    for (const b of budgets) {
+      lines.push(`  ${b.category}: spent $${b.spent.toFixed(2)} of $${b.limit.toFixed(2)} limit`);
+    }
+  }
+
+  if (transactions.length > 0) {
+    const sorted = [...transactions]
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 100);
+    lines.push("\nRECENT TRANSACTIONS (newest first):");
+    for (const t of sorted) {
+      const sign = t.amount >= 0 ? "+" : "";
+      lines.push(`  ${t.date} | ${t.description}${t.merchant ? ` (${t.merchant})` : ""} | ${sign}$${t.amount.toFixed(2)} | ${t.category}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function useTabBarHeight() {
@@ -129,20 +269,53 @@ function useTabBarHeight() {
 export default function AssistantScreen() {
   const insets = useSafeAreaInsets();
   const tabBarHeight = useTabBarHeight();
-  const { token } = useAuth();
+  const { token, user } = useAuth();
+  const { isPro, openPaywall } = usePro();
+  const { accounts, transactions, budgets, monthlyIncome, monthlyExpenses, netWorth, totalAssets, totalLiabilities, setBudgets } = useFinance();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [showTyping, setShowTyping] = useState(false);
+  const [freeUsageCount, setFreeUsageCount] = useState(0);
   const inputRef = useRef<TextInput>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const topPad = Platform.OS === "web" ? Math.max(insets.top, 67) : insets.top;
+
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  React.useEffect(() => {
+    const show = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow", () => setKeyboardVisible(true));
+    const hide = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide", () => setKeyboardVisible(false));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+
   const inputBottomPad = Platform.OS === "web"
     ? Math.max(insets.bottom, 34) + 8
-    : tabBarHeight + 8;
+    : keyboardVisible ? insets.bottom + 8 : tabBarHeight + 8;
+
+  // Load free usage count for non-pro users
+  React.useEffect(() => {
+    if (!user || isPro) return;
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, "users", user.id, "aiUsage", "monthly"));
+        if (snap.exists()) {
+          const data = snap.data();
+          const now = new Date();
+          const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+          setFreeUsageCount(data[key] ?? 0);
+        }
+      } catch { /* best-effort — don't block the UI */ }
+    })();
+  }, [user, isPro]);
+
+  const addErrorMessage = useCallback((text: string) => {
+    setMessages((prev) => [...prev, { id: genId(), role: "assistant", content: text, isError: true }]);
+  }, []);
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isStreaming) return;
+
     const trimmed = text.trim();
     const currentMessages = [...messages];
     const userMsg: Message = { id: genId(), role: "user", content: trimmed };
@@ -152,11 +325,49 @@ export default function AssistantScreen() {
     setShowTyping(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
+    // Free tier usage gating
+    if (!isPro) {
+      if (freeUsageCount >= 3) {
+        setIsStreaming(false);
+        setShowTyping(false);
+        openPaywall();
+        return;
+      }
+      const now = new Date();
+      const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const newCount = freeUsageCount + 1;
+      try {
+        await setDoc(doc(db, "users", user!.id, "aiUsage", "monthly"), { [key]: newCount }, { merge: true });
+        setFreeUsageCount(newCount);
+      } catch { /* best-effort — don't block the message */ }
+    }
+
+    // Build financial context — failure is non-blocking
+    let financialContext = "";
     try {
-      const chatHistory = [
-        ...currentMessages.map((m) => ({ role: m.role, content: m.content })),
-        { role: "user", content: trimmed },
-      ];
+      financialContext = buildFinancialContext(
+        accounts, transactions, budgets,
+        monthlyIncome, monthlyExpenses, netWorth, totalAssets, totalLiabilities,
+      );
+    } catch {
+      // Context injection failed — send message without financial data
+    }
+
+    const contextPrefix = financialContext.length > 0
+      ? `[FINANCIAL DATA]\n${financialContext}\n[/FINANCIAL DATA]\n\n`
+      : "";
+
+    const chatHistory = [
+      ...currentMessages.map((m) => ({ role: m.role, content: m.content })),
+      { role: "user", content: contextPrefix + trimmed },
+    ];
+
+    // Set up timeout + abort controller
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const timeoutId = setTimeout(() => controller.abort("timeout"), AI_TIMEOUT_MS);
+
+    try {
       const response = await fetch(`${getFunctionsUrl()}/chat`, {
         method: "POST",
         headers: {
@@ -164,15 +375,48 @@ export default function AssistantScreen() {
           Accept: "text/event-stream",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ messages: chatHistory }),
+        body: JSON.stringify({
+          messages: chatHistory,
+          ...(hasBudgetIntent(trimmed) ? { forceTool: "set_budgets" } : {}),
+        }),
+        signal: controller.signal,
       });
-      if (!response.ok) throw new Error("Request failed");
+
+      setNetworkOnline();
+      clearTimeout(timeoutId);
+
+      // Handle HTTP error codes before streaming
+      if (!response.ok) {
+        if (response.status === 429) {
+          addErrorMessage(AI_MESSAGES.RATE_LIMIT.message);
+          return;
+        }
+        if (response.status === 500 || response.status === 503) {
+          addErrorMessage(AI_MESSAGES.UNAVAILABLE.message);
+          return;
+        }
+        // Try to parse a structured error
+        const errBody = await response.json().catch(() => ({}));
+        const errMsg = errBody?.error ?? "";
+        if (errMsg.toLowerCase().includes("content") || errMsg.toLowerCase().includes("policy")) {
+          addErrorMessage(AI_MESSAGES.CONTENT_POLICY.message);
+        } else {
+          addErrorMessage(AI_MESSAGES.UNAVAILABLE.message);
+        }
+        return;
+      }
+
       const reader = response.body?.getReader();
-      if (!reader) throw new Error("No stream");
+      if (!reader) {
+        addErrorMessage(AI_MESSAGES.STREAM_INTERRUPTED.message);
+        return;
+      }
+
       const decoder = new TextDecoder();
       let buffer = "";
       let fullContent = "";
       let assistantAdded = false;
+      let assistantMsgId = genId();
 
       while (true) {
         const { done, value } = await reader.read();
@@ -180,38 +424,92 @@ export default function AssistantScreen() {
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
+
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6);
           if (data === "[DONE]") continue;
+
           try {
             const parsed = JSON.parse(data);
+
             if (parsed.content) {
               fullContent += parsed.content;
+              setShowTyping(false);
               if (!assistantAdded) {
-                setShowTyping(false);
-                setMessages((prev) => [...prev, { id: genId(), role: "assistant", content: fullContent }]);
+                setMessages((prev) => [...prev, { id: assistantMsgId, role: "assistant", content: fullContent }]);
                 assistantAdded = true;
               } else {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = { ...updated[updated.length - 1], content: fullContent };
-                  return updated;
-                });
+                setMessages((prev) => prev.map((m) =>
+                  m.id === assistantMsgId ? { ...m, content: fullContent } : m
+                ));
               }
             }
-          } catch {}
+
+            if (parsed.action === "set_budgets" && Array.isArray(parsed.budgets)) {
+              const newBudgets = parsed.budgets.map((b: BudgetItem) => ({
+                category: b.category,
+                limit: b.limit,
+                spent: 0,
+              }));
+              try {
+                await setBudgets(newBudgets);
+                Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              } catch {
+                toast.warning("Couldn't save the suggested budget. Please try again.");
+              }
+
+              const action: MessageAction = {
+                type: "set_budgets",
+                budgets: parsed.budgets,
+                summary: parsed.summary || "",
+                applied: true,
+              };
+
+              setMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.id === assistantMsgId) {
+                  return prev.map((m) => m.id === assistantMsgId ? { ...m, action } : m);
+                }
+                return [...prev, { id: assistantMsgId, role: "assistant", content: "", action }];
+              });
+            }
+          } catch { /* malformed SSE chunk — skip */ }
         }
       }
-    } catch {
+
+      // Empty response guard
+      if (fullContent.trim().length === 0 && !assistantAdded) {
+        addErrorMessage(AI_MESSAGES.EMPTY_RESPONSE.message);
+      }
+    } catch (err: any) {
+      clearTimeout(timeoutId);
       setShowTyping(false);
-      setMessages((prev) => [...prev, { id: genId(), role: "assistant", content: "Sorry, I had trouble connecting. Please try again." }]);
+
+      const isAbort = err?.name === "AbortError" || err === "timeout";
+      const msg: string = (err?.message ?? "").toLowerCase();
+
+      if (isAbort) {
+        addErrorMessage(AI_MESSAGES.TIMEOUT.message);
+      } else if (
+        msg.includes("network request failed") ||
+        msg.includes("failed to fetch") ||
+        msg.includes("network error")
+      ) {
+        setNetworkOffline();
+        addErrorMessage(NETWORK_MESSAGES.OFFLINE.message);
+      } else if (msg.includes("content") || msg.includes("policy")) {
+        addErrorMessage(AI_MESSAGES.CONTENT_POLICY.message);
+      } else {
+        addErrorMessage("Sorry, I had trouble connecting. Please try again.");
+      }
     } finally {
       setIsStreaming(false);
       setShowTyping(false);
+      abortRef.current = null;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
-  }, [messages, isStreaming]);
+  }, [messages, isStreaming, accounts, transactions, budgets, monthlyIncome, monthlyExpenses, netWorth, totalAssets, totalLiabilities, token, setBudgets, isPro, freeUsageCount, openPaywall, user, addErrorMessage]);
 
   const handleSend = useCallback(() => {
     sendMessage(input);
@@ -227,7 +525,7 @@ export default function AssistantScreen() {
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>AI Assistant</Text>
-          <Text style={styles.headerSubtitle}>Canadian Finance Coach</Text>
+          <Text style={styles.headerSubtitle}>Agentic Finance Coach</Text>
         </View>
         <View style={styles.statusDot}>
           <View style={styles.onlineDot} />
@@ -238,7 +536,7 @@ export default function AssistantScreen() {
       <KeyboardAvoidingView
         style={styles.chatContainer}
         behavior="padding"
-        keyboardVerticalOffset={tabBarHeight}
+        keyboardVerticalOffset={0}
       >
         <FlatList
           data={reversedMessages}
@@ -256,18 +554,27 @@ export default function AssistantScreen() {
         />
 
         <View style={[styles.inputContainer, { paddingBottom: inputBottomPad }]}>
+          {!isPro && freeUsageCount >= 2 && (
+            <View style={styles.freeWarning}>
+              <Text style={styles.freeWarningText}>
+                {freeUsageCount >= 3 ? "Free limit reached" : `${3 - freeUsageCount} free message${3 - freeUsageCount !== 1 ? "s" : ""} left`}
+              </Text>
+              <Pressable onPress={openPaywall}>
+                <Text style={styles.freeWarningUpgrade}>Upgrade →</Text>
+              </Pressable>
+            </View>
+          )}
           <View style={styles.inputRow}>
             <TextInput
               ref={inputRef}
               style={styles.input}
               value={input}
               onChangeText={setInput}
-              placeholder="Ask about TFSA, RRSP, taxes..."
+              placeholder="Ask about spending, create a budget…"
               placeholderTextColor={C.textMuted}
               multiline
               maxLength={500}
               returnKeyType="default"
-              blurOnSubmit={false}
               editable={!isStreaming}
             />
             <Animated.View style={sendStyle}>
@@ -311,15 +618,56 @@ const styles = StyleSheet.create({
   listContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, flexGrow: 1 },
   bubbleContainer: { flexDirection: "row", marginBottom: 12, alignItems: "flex-end", gap: 8 },
   bubbleContainerUser: { justifyContent: "flex-end" },
+  bubbleColumn: { flex: 1, gap: 4 },
   avatarContainer: {
     width: 28, height: 28, borderRadius: 14,
     backgroundColor: `${C.tint}20`, alignItems: "center", justifyContent: "center", marginBottom: 2,
+    flexShrink: 0,
   },
-  bubble: { maxWidth: "78%", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10 },
-  bubbleUser: { backgroundColor: C.tint, borderBottomRightRadius: 4 },
+  avatarError: { backgroundColor: `${C.negative}20` },
+  bubble: { maxWidth: "100%", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10 },
+  bubbleUser: { backgroundColor: C.tint, borderBottomRightRadius: 4, alignSelf: "flex-end", maxWidth: "78%" },
   bubbleAssistant: { backgroundColor: C.elevated, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: C.border },
+  bubbleErrorAssistant: { backgroundColor: `${C.negative}12`, borderColor: `${C.negative}30` },
   bubbleText: { fontFamily: "DM_Sans_400Regular", fontSize: 15, color: C.text, lineHeight: 22 },
   bubbleTextUser: { color: "#000", fontFamily: "DM_Sans_500Medium" },
+  bubbleTextError: { color: C.negative },
+  disclaimer: {
+    fontFamily: "DM_Sans_400Regular", fontSize: 11, color: C.textMuted,
+    lineHeight: 15, paddingHorizontal: 4, marginTop: 2,
+  },
+  // Action card
+  actionCard: {
+    backgroundColor: C.card,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: `${C.tint}40`,
+    overflow: "hidden",
+  },
+  actionCardHeader: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 8 },
+  actionCardBadge: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: `${C.tint}18`, alignSelf: "flex-start",
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20,
+  },
+  actionCardBadgeText: { fontFamily: "DM_Sans_600SemiBold", fontSize: 12, color: C.tint },
+  actionCardSummary: {
+    fontFamily: "DM_Sans_400Regular", fontSize: 13, color: C.textSecondary,
+    paddingHorizontal: 14, paddingBottom: 10, lineHeight: 18,
+  },
+  actionCardDivider: { height: 1, backgroundColor: C.border, marginHorizontal: 14 },
+  actionBudgetRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: 14, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  actionBudgetIcon: {
+    width: 28, height: 28, borderRadius: 8,
+    backgroundColor: `${C.tint}15`, alignItems: "center", justifyContent: "center",
+  },
+  actionBudgetCategory: { fontFamily: "DM_Sans_500Medium", fontSize: 14, color: C.text, flex: 1 },
+  actionBudgetLimit: { fontFamily: "DM_Sans_700Bold", fontSize: 14, color: C.tint },
+  // Typing
   typingBubble: { flexDirection: "row", alignItems: "flex-end", marginBottom: 12 },
   typingDots: {
     flexDirection: "row", gap: 4, backgroundColor: C.elevated,
@@ -327,17 +675,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14, paddingVertical: 14, borderWidth: 1, borderColor: C.border,
   },
   dot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: C.tint },
-  emptyState: { flex: 1, alignItems: "center", paddingTop: 40, gap: 12 },
+  // Empty state
+  emptyState: { flex: 1, alignItems: "center", paddingTop: 40, paddingHorizontal: 20, gap: 12 },
   emptyIcon: {
     width: 64, height: 64, borderRadius: 32,
     backgroundColor: `${C.tint}18`, alignItems: "center", justifyContent: "center",
     marginBottom: 4, borderWidth: 1, borderColor: `${C.tint}30`,
   },
-  emptyTitle: { fontFamily: "DM_Sans_700Bold", fontSize: 22, color: C.text, textAlign: "center" },
-  emptySubtitle: { fontFamily: "DM_Sans_400Regular", fontSize: 14, color: C.textSecondary, textAlign: "center", lineHeight: 22, marginBottom: 8 },
+  emptyTitle: { fontFamily: "DM_Sans_700Bold", fontSize: 22, color: C.text, textAlign: "center", alignSelf: "stretch" },
+  emptySubtitle: { fontFamily: "DM_Sans_400Regular", fontSize: 14, color: C.textSecondary, textAlign: "center", lineHeight: 22, marginBottom: 8, alignSelf: "stretch" },
   quickPromptsGrid: { width: "100%", gap: 8 },
   quickPrompt: { backgroundColor: C.card, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: C.border },
   quickPromptText: { fontFamily: "DM_Sans_500Medium", fontSize: 13, color: C.textSecondary },
+  // Free tier warning
+  freeWarning: {
+    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
+    backgroundColor: `${C.gold}18`, borderRadius: 10,
+    paddingHorizontal: 14, paddingVertical: 8, marginBottom: 8,
+    borderWidth: 1, borderColor: `${C.gold}30`,
+  },
+  freeWarningText: { fontFamily: "DM_Sans_500Medium", fontSize: 13, color: C.gold },
+  freeWarningUpgrade: { fontFamily: "DM_Sans_600SemiBold", fontSize: 13, color: C.tint },
+  // Input
   inputContainer: { backgroundColor: C.background, paddingHorizontal: 16, paddingTop: 8, borderTopWidth: 1, borderTopColor: C.border },
   inputRow: {
     flexDirection: "row", alignItems: "flex-end", gap: 10,

@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow create: if request.auth != null && request.auth.uid == userId;
+      allow update: if request.auth != null && request.auth.uid == userId;
+      allow delete: if false; // Prevent accidental root document deletion
+
+      match /accounts/{accountId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow create, update: if request.auth != null && request.auth.uid == userId
+          && request.resource.data.balance is number
+          && request.resource.data.name is string;
+        allow delete: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /transactions/{transactionId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow create, update: if request.auth != null && request.auth.uid == userId
+          && request.resource.data.amount is number
+          && request.resource.data.date is string;
+        allow delete: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /goals/{goalId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /net_worth_snapshots/{snapshotId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false; // Written only by Cloud Functions
+      }
+
+      match /scenarios/{scenarioId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /budgetItems/{itemId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow create, update: if request.auth != null && request.auth.uid == userId
+          && request.resource.data.budgetedAmount is number
+          && request.resource.data.name is string;
+        allow delete: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /aiUsage/{doc} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // Audit logs — written only by Cloud Functions via Admin SDK
+    match /audit_logs/{logId} {
+      allow read, write: if false;
+    }
+
+    // Idempotency keys — written only by Cloud Functions via Admin SDK
+    match /idempotency_keys/{key} {
+      allow read, write: if false;
+    }
+  }
+}

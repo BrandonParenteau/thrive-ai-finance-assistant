@@ -10,6 +10,7 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
+  Keyboard,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -26,6 +27,11 @@ import Colors from "@/constants/colors";
 import { useFinance, Account } from "@/context/FinanceContext";
 import { useAuth } from "@/context/AuthContext";
 import { getFunctionsUrl } from "@/lib/functions";
+import { usePro } from "@/hooks/usePro";
+import toast from "@/utils/toast";
+import { withRetry } from "@/utils/withRetry";
+import { mapError, PLAID_MESSAGES, NETWORK_MESSAGES } from "@/utils/errorMessages";
+import { setNetworkOffline, setNetworkOnline } from "@/hooks/useNetworkStatus";
 
 const C = Colors.dark;
 
@@ -60,7 +66,24 @@ const TYPE_ICONS: Record<Account["type"], keyof typeof Ionicons.glyphMap> = {
   credit: "card-outline",
 };
 
-function AccountRow({ account, onRemove }: { account: Account; onRemove: () => void }) {
+/**
+ * Maps a Plaid error code (from API response) to a user-friendly alert.
+ * Returns null if the error is a user cancellation (no alert needed).
+ */
+function handlePlaidError(plaidErrorCode: string | undefined, fallbackMessage: string): { title: string; message: string } | null {
+  if (!plaidErrorCode) {
+    return { title: "Connection Error", message: fallbackMessage };
+  }
+  // User closed the Plaid Link sheet before completing — treat as cancellation
+  if (plaidErrorCode === "USER_CANCELLED" || plaidErrorCode === "EXIT") {
+    return null;
+  }
+  const mapped = PLAID_MESSAGES[plaidErrorCode];
+  if (mapped) return { title: mapped.title, message: mapped.message };
+  return { title: "Connection Error", message: fallbackMessage };
+}
+
+function AccountRow({ account, onEdit, onRemove }: { account: Account; onEdit: () => void; onRemove: () => void }) {
   const scale = useSharedValue(1);
   const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
   const icon = TYPE_ICONS[account.type];
@@ -71,11 +94,13 @@ function AccountRow({ account, onRemove }: { account: Account; onRemove: () => v
       <Pressable
         onPressIn={() => { scale.value = withSpring(0.98); }}
         onPressOut={() => { scale.value = withSpring(1); }}
+        onPress={onEdit}
         onLongPress={() => {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          Alert.alert("Remove Account", `Remove "${account.name}"?`, [
-            { text: "Cancel", style: "cancel" },
+          Alert.alert(account.name, "What would you like to do?", [
+            { text: "Edit", onPress: onEdit },
             { text: "Remove", style: "destructive", onPress: onRemove },
+            { text: "Cancel", style: "cancel" },
           ]);
         }}
         style={styles.accountRow}
@@ -92,6 +117,11 @@ function AccountRow({ account, onRemove }: { account: Account; onRemove: () => v
                 {account.type.toUpperCase()}
               </Text>
             </View>
+            {account.plaidAccountId && (
+              <View style={styles.plaidBadge}>
+                <Text style={styles.plaidBadgeText}>PLAID</Text>
+              </View>
+            )}
           </View>
         </View>
         <Text style={[styles.balance, isNegative && { color: C.negative }]}>
@@ -102,35 +132,54 @@ function AccountRow({ account, onRemove }: { account: Account; onRemove: () => v
   );
 }
 
-function AddAccountModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-  const { addAccount } = useFinance();
-  const [name, setName] = useState("");
-  const [institution, setInstitution] = useState("TD Bank");
-  const [selectedType, setSelectedType] = useState<Account["type"]>("chequing");
-  const [balance, setBalance] = useState("");
-  const [selectedColor, setSelectedColor] = useState(ACCOUNT_COLORS[0]);
+function AccountModal({
+  visible,
+  initial,
+  onClose,
+}: {
+  visible: boolean;
+  initial?: Account | null;
+  onClose: () => void;
+}) {
+  const { addAccount, updateAccount } = useFinance();
+  const isEdit = !!initial;
+
+  const [name, setName] = useState(initial?.name ?? "");
+  const [institution, setInstitution] = useState(initial?.institution ?? "TD Bank");
+  const [selectedType, setSelectedType] = useState<Account["type"]>(initial?.type ?? "chequing");
+  const [balance, setBalance] = useState(initial ? String(initial.balance) : "");
+  const [selectedColor, setSelectedColor] = useState(initial?.color ?? ACCOUNT_COLORS[0]);
+  const [loading, setLoading] = useState(false);
   const insets = useSafeAreaInsets();
 
-  const handleAdd = () => {
-    if (!name.trim()) {
-      Alert.alert("Name required", "Please enter an account name.");
-      return;
+  React.useEffect(() => {
+    if (visible) {
+      setName(initial?.name ?? "");
+      setInstitution(initial?.institution ?? "TD Bank");
+      setSelectedType(initial?.type ?? "chequing");
+      setBalance(initial ? String(initial.balance) : "");
+      setSelectedColor(initial?.color ?? ACCOUNT_COLORS[0]);
     }
+  }, [visible, initial?.id]);
+
+  const handleSave = async () => {
+    if (!name.trim()) { Alert.alert("Name Required", "Please enter an account name."); return; }
     const bal = parseFloat(balance.replace(/[^0-9.-]/g, ""));
-    if (isNaN(bal)) {
-      Alert.alert("Invalid balance", "Please enter a valid balance.");
-      return;
+    if (isNaN(bal)) { Alert.alert("Invalid Balance", "Please enter a valid dollar amount (e.g. 1500.00)."); return; }
+    setLoading(true);
+    try {
+      if (isEdit && initial) {
+        await updateAccount(initial.id, { name: name.trim(), institution, type: selectedType, balance: bal, color: selectedColor });
+      } else {
+        await addAccount({ name: name.trim(), institution, type: selectedType, balance: bal, color: selectedColor });
+      }
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      onClose();
+    } catch (e: any) {
+      Alert.alert(e.title ?? "Error", e.message || "Couldn't save the account. Please try again.");
+    } finally {
+      setLoading(false);
     }
-    addAccount({
-      name: name.trim(),
-      institution,
-      type: selectedType,
-      balance: bal,
-      color: selectedColor,
-    });
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setName(""); setBalance(""); setSelectedType("chequing"); setInstitution("TD Bank");
-    onClose();
   };
 
   return (
@@ -138,13 +187,13 @@ function AddAccountModal({ visible, onClose }: { visible: boolean; onClose: () =
       <View style={[styles.modal, { paddingBottom: insets.bottom + 20 }]}>
         <View style={styles.modalHandle} />
         <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>Add Account</Text>
+          <Text style={styles.modalTitle}>{isEdit ? "Edit Account" : "Add Account"}</Text>
           <Pressable onPress={onClose} style={styles.closeBtn}>
             <Ionicons name="close" size={22} color={C.textSecondary} />
           </Pressable>
         </View>
 
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 20 }}>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 20 }} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
           <View style={styles.fieldGroup}>
             <Text style={styles.fieldLabel}>Account Name</Text>
             <TextInput
@@ -218,9 +267,10 @@ function AddAccountModal({ visible, onClose }: { visible: boolean; onClose: () =
             </View>
           </View>
 
-          <Pressable onPress={handleAdd} style={styles.addBtn}>
-            <Ionicons name="checkmark" size={20} color="#000" />
-            <Text style={styles.addBtnText}>Add Account</Text>
+          <Pressable onPress={handleSave} style={styles.addBtn} disabled={loading}>
+            {loading
+              ? <ActivityIndicator color="#000" />
+              : <><Ionicons name="checkmark" size={20} color="#000" /><Text style={styles.addBtnText}>{isEdit ? "Save Changes" : "Add Account"}</Text></>}
           </Pressable>
         </ScrollView>
       </View>
@@ -232,7 +282,9 @@ export default function AccountsScreen() {
   const insets = useSafeAreaInsets();
   const { accounts, removeAccount, totalAssets, totalLiabilities, refreshAccounts } = useFinance();
   const { token } = useAuth();
+  const { isPro, openPaywall } = usePro();
   const [showModal, setShowModal] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [connecting, setConnecting] = useState(false);
 
@@ -246,43 +298,118 @@ export default function AccountsScreen() {
   };
 
   const handleSync = useCallback(async () => {
+    if (syncing) return;
     setSyncing(true);
     try {
-      await fetch(`${getFunctionsUrl()}/plaidSyncTransactions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const resp = await withRetry(
+        () => fetch(`${getFunctionsUrl()}/plaidSyncTransactions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        { maxAttempts: 3, baseDelayMs: 1_000 }
+      );
+
+      setNetworkOnline();
+
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        const plaidCode = data.plaid_error_code ?? data.error_code;
+        const info = handlePlaidError(plaidCode, data.error || "Couldn't sync transactions. Please try again.");
+        if (info) {
+          // Login required needs a prompt to reconnect, not just a toast
+          if (plaidCode === "ITEM_LOGIN_REQUIRED") {
+            Alert.alert(info.title, info.message + "\n\nTap \"Reconnect\" to re-link your bank account.", [
+              { text: "Reconnect", onPress: handleConnectPlaid },
+              { text: "Dismiss", style: "cancel" },
+            ]);
+          } else {
+            toast.warning(info.message);
+          }
+        }
+        return;
+      }
+
       await refreshAccounts();
-      Alert.alert("Synced", "Transactions updated successfully.");
+      toast.success("Transactions synced successfully.");
     } catch (e) {
-      Alert.alert("Sync Failed", "Could not sync transactions.");
+      const mapped = mapError(e);
+      if (mapped === NETWORK_MESSAGES.OFFLINE) setNetworkOffline();
+      toast.error(mapped.message);
     } finally {
       setSyncing(false);
     }
-  }, [token]);
+  }, [token, syncing, refreshAccounts]);
 
   const handleConnectPlaid = useCallback(async () => {
+    if (!token) {
+      Alert.alert("Sign In Required", "Please sign in before connecting a bank account.");
+      return;
+    }
+    if (connecting) return;
     setConnecting(true);
     try {
       const base = getFunctionsUrl();
-      const resp = await fetch(`${base}/plaidLinkToken`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      });
-      const data = await resp.json();
+      const resp = await withRetry(
+        () => fetch(`${base}/plaidLinkToken`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        }),
+        { maxAttempts: 2, baseDelayMs: 1_000 }
+      );
+
+      setNetworkOnline();
+
+      const data = await resp.json().catch(() => ({}));
+
       if (!resp.ok) {
-        Alert.alert("Error", data.error || "Could not start Plaid connection.");
+        const plaidCode = data.plaid_error_code ?? data.error_code;
+        const info = handlePlaidError(plaidCode, data.error || "Couldn't start the bank connection. Please try again.");
+        if (resp.status === 429) {
+          Alert.alert("Too Many Requests", "Too many connection attempts. Please wait a few minutes and try again.");
+        } else if (info) {
+          Alert.alert(info.title, info.message);
+        }
         return;
       }
-      await WebBrowser.openBrowserAsync(`${base}/plaidLink?session=${encodeURIComponent(data.session_token)}`);
+
+      if (!data.session_token) {
+        Alert.alert("Connection Error", "Couldn't retrieve a valid session token. Please try again.");
+        return;
+      }
+
+      // Open Plaid Link in browser
+      const result = await WebBrowser.openBrowserAsync(
+        `${base}/plaidLink?session=${encodeURIComponent(data.session_token)}`
+      );
+
+      // WebBrowser returns { type: "cancel" } when user dismisses without completing
+      if (result.type === "cancel" || result.type === "dismiss") {
+        // User cancelled — no error needed
+        return;
+      }
+
+      // Refresh accounts after successful link
       await refreshAccounts();
-      Alert.alert("Connected!", "Your bank account has been linked and transactions imported.");
+
+      const newPlaidAccounts = accounts.filter((a) => a.plaidAccountId);
+      if (newPlaidAccounts.length > 0) {
+        toast.success("Bank account connected! Your transactions have been imported.");
+      } else {
+        // Refresh may show newly linked accounts
+        toast.success("Bank account connected successfully.");
+      }
     } catch (err: any) {
-      Alert.alert("Connection Failed", err.message || "Unable to connect to Plaid.");
+      const mapped = mapError(err);
+      if (mapped === NETWORK_MESSAGES.OFFLINE) {
+        setNetworkOffline();
+        Alert.alert("No Internet Connection", "Please check your connection and try again.");
+      } else {
+        Alert.alert(mapped.title ?? "Connection Failed", mapped.message);
+      }
     } finally {
       setConnecting(false);
     }
-  }, [token]);
+  }, [token, connecting, refreshAccounts, accounts]);
 
   return (
     <View style={[styles.container, { paddingTop: topPad }]}>
@@ -326,7 +453,7 @@ export default function AccountsScreen() {
             <View style={styles.card}>
               {byType.banking.map((a, i) => (
                 <View key={a.id}>
-                  <AccountRow account={a} onRemove={() => removeAccount(a.id)} />
+                  <AccountRow account={a} onEdit={() => setEditingAccount(a)} onRemove={() => removeAccount(a.id)} />
                   {i < byType.banking.length - 1 && <View style={styles.rowDivider} />}
                 </View>
               ))}
@@ -346,7 +473,7 @@ export default function AccountsScreen() {
             <View style={styles.card}>
               {byType.registered.map((a, i) => (
                 <View key={a.id}>
-                  <AccountRow account={a} onRemove={() => removeAccount(a.id)} />
+                  <AccountRow account={a} onEdit={() => setEditingAccount(a)} onRemove={() => removeAccount(a.id)} />
                   {i < byType.registered.length - 1 && <View style={styles.rowDivider} />}
                 </View>
               ))}
@@ -360,7 +487,7 @@ export default function AccountsScreen() {
             <View style={styles.card}>
               {byType.investments.map((a, i) => (
                 <View key={a.id}>
-                  <AccountRow account={a} onRemove={() => removeAccount(a.id)} />
+                  <AccountRow account={a} onEdit={() => setEditingAccount(a)} onRemove={() => removeAccount(a.id)} />
                   {i < byType.investments.length - 1 && <View style={styles.rowDivider} />}
                 </View>
               ))}
@@ -374,7 +501,7 @@ export default function AccountsScreen() {
             <View style={styles.card}>
               {byType.credit.map((a, i) => (
                 <View key={a.id}>
-                  <AccountRow account={a} onRemove={() => removeAccount(a.id)} />
+                  <AccountRow account={a} onEdit={() => setEditingAccount(a)} onRemove={() => removeAccount(a.id)} />
                   {i < byType.credit.length - 1 && <View style={styles.rowDivider} />}
                 </View>
               ))}
@@ -384,27 +511,35 @@ export default function AccountsScreen() {
 
         {/* Plaid Connect Button */}
         <Pressable
-          onPress={handleConnectPlaid}
+          onPress={isPro ? handleConnectPlaid : openPaywall}
           disabled={connecting}
           style={[styles.plaidConnectBtn, connecting && { opacity: 0.6 }]}
         >
+          {!isPro && <Ionicons name="lock-closed" size={16} color="#000" />}
           {connecting
             ? <ActivityIndicator color="#000" />
             : <Ionicons name="link-outline" size={20} color="#000" />}
           <Text style={styles.plaidConnectText}>
-            {connecting ? "Connecting..." : "Connect Bank with Plaid"}
+            {connecting ? "Connecting…" : "Connect Bank with Plaid"}
           </Text>
         </Pressable>
 
         <View style={styles.tipCard}>
           <Ionicons name="information-circle-outline" size={18} color={C.tint} />
           <Text style={styles.tipText}>
-            Long-press any account to remove it. Use + to add a manual account, or connect your bank with Plaid above.
+            Tap any account to edit it. Long-press to remove. Use + to add a manual account, or connect your bank with Plaid above.
           </Text>
         </View>
       </ScrollView>
 
-      <AddAccountModal visible={showModal} onClose={() => setShowModal(false)} />
+      <AccountModal visible={showModal} onClose={() => setShowModal(false)} />
+      {editingAccount && (
+        <AccountModal
+          visible
+          initial={editingAccount}
+          onClose={() => setEditingAccount(null)}
+        />
+      )}
     </View>
   );
 }
@@ -443,7 +578,7 @@ const styles = StyleSheet.create({
   summaryDivider: { width: 1, backgroundColor: C.border },
   section: { gap: 10 },
   sectionHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
-  sectionTitle: { fontFamily: "DM_Sans_600SemiBold", fontSize: 17, color: C.text },
+  sectionTitle: { fontFamily: "DM_Sans_600SemiBold", fontSize: 17, color: C.text, flexShrink: 1 },
   caBadge: {
     flexDirection: "row", alignItems: "center", gap: 4,
     backgroundColor: `${C.tint}18`,
@@ -474,6 +609,8 @@ const styles = StyleSheet.create({
   accountInstitution: { fontFamily: "DM_Sans_400Regular", fontSize: 12, color: C.textMuted },
   typeBadge: { borderRadius: 5, paddingHorizontal: 5, paddingVertical: 2 },
   typeText: { fontFamily: "DM_Sans_700Bold", fontSize: 9, letterSpacing: 0.5 },
+  plaidBadge: { borderRadius: 5, paddingHorizontal: 5, paddingVertical: 2, backgroundColor: "#1A3AFF22" },
+  plaidBadgeText: { fontFamily: "DM_Sans_700Bold", fontSize: 9, letterSpacing: 0.5, color: "#4F7EFF" },
   balance: { fontFamily: "DM_Sans_700Bold", fontSize: 16, color: C.text },
   rowDivider: { height: 1, backgroundColor: C.border, marginHorizontal: 16 },
   plaidConnectBtn: {
@@ -486,7 +623,7 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     paddingHorizontal: 20,
   },
-  plaidConnectText: { fontFamily: "DM_Sans_600SemiBold", fontSize: 16, color: "#000", flexShrink: 1 },
+  plaidConnectText: { fontFamily: "DM_Sans_600SemiBold", fontSize: 16, color: "#000", textAlign: "center" },
   tipCard: {
     flexDirection: "row", gap: 10,
     backgroundColor: `${C.tint}10`,

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /Users/brandonparenteau/Downloads/Thrive-AI-Finance-Assistant/functions && npm run build 2>&1 | tail -30)",
+      "Bash(cd /Users/brandonparenteau/Downloads/Thrive-AI-Finance-Assistant && firebase functions:log --only parseStatement -n 50 2>&1)",
+      "Bash(cd /Users/brandonparenteau/Downloads/Thrive-AI-Finance-Assistant/functions && npm run build 2>&1)",
+      "Bash(npm run build 2>&1)",
+      "Bash(cd /Users/brandonparenteau/Downloads/Thrive-AI-Finance-Assistant && firebase deploy --only functions:parseStatement --force 2>&1)",
+      "Bash(npm run build 2>&1 && cd .. && firebase deploy --only functions:parseStatement --force 2>&1)",
+      "Bash(firebase functions:log --only parseStatement -n 200)",
+      "Read(//private/tmp/**)",
+      "Bash(node -e \"const m = require\\('/Users/brandonparenteau/Downloads/Thrive-AI-Finance-Assistant/node_modules/react-native-keyboard-controller'\\); console.log\\(Object.keys\\(m\\).filter\\(k => k.toLowerCase\\(\\).includes\\('keyboard'\\) || k.toLowerCase\\(\\).includes\\('animation'\\)\\)\\)\" 2>&1)",
+      "Bash(grep -r \"useKeyboardAnimation\\\\|useReanimatedKeyboardAnimation\" /Users/brandonparenteau/Downloads/Thrive-AI-Finance-Assistant/node_modules/react-native-keyboard-controller/src/ --include=\"*.ts\" --include=\"*.tsx\" -l 2>/dev/null | head -5)",
+      "Bash(firebase deploy --only firestore:rules 2>&1)",
+      "Bash(npm install react-native-purchases 2>&1 | tail -5)",
+      "Bash(npm run deploy:functions 2>&1)"
+    ]
+  }
+}

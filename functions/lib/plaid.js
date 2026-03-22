@@ -38,6 +38,38 @@ const https_1 = require("firebase-functions/v2/https");
 const admin = __importStar(require("firebase-admin"));
 const crypto = __importStar(require("crypto"));
 const plaid_1 = require("plaid");
+// FIX 8 — Remove PII from logs: short hash helper
+function shortHash(uid) {
+    return crypto.createHash("sha256").update(uid).digest("hex").slice(0, 8);
+}
+// FIX 19 — Audit logging helper
+async function auditLog(db, action, uid, meta = {}) {
+    try {
+        await db.collection("audit_logs").add({
+            action,
+            uid_hash: shortHash(uid),
+            meta,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        });
+    }
+    catch {
+        // Non-critical — don't fail request if audit log fails
+    }
+}
+// Simple in-memory rate limiter (resets on cold start)
+const rateLimitMap = new Map();
+function checkRateLimit(key, maxRequests, windowMs) {
+    const now = Date.now();
+    const entry = rateLimitMap.get(key);
+    if (!entry || now > entry.resetAt) {
+        rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
+        return true;
+    }
+    if (entry.count >= maxRequests)
+        return false;
+    entry.count++;
+    return true;
+}
 // ── Config from environment (set in functions/.env) ───────────────────────────
 function getPlaidClient() {
     const clientId = process.env.PLAID_CLIENT_ID;
@@ -67,24 +99,42 @@ function makePlaidClient(clientId, secret) {
     });
     return new plaid_1.PlaidApi(config);
 }
-// ── Encryption (AES-256-GCM) ──────────────────────────────────────────────────
-function encrypt(text, keyHex) {
-    const key = Buffer.from(keyHex, "hex");
+// ── Encryption (AES-256-GCM) with key versioning (FIX 11) ────────────────────
+function encrypt(text) {
+    const key = Buffer.from(getEncryptionKey(), "hex");
     const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
     const encrypted = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
-    return `${iv.toString("hex")}:${encrypted.toString("hex")}:${tag.toString("hex")}`;
+    // v2 format: v2:iv:encrypted:tag
+    return `v2:${iv.toString("hex")}:${encrypted.toString("hex")}:${tag.toString("hex")}`;
 }
-function decrypt(data, keyHex) {
-    const [ivHex, encHex, tagHex] = data.split(":");
+function decrypt(encryptedText, keyHex) {
     const key = Buffer.from(keyHex, "hex");
+    // Handle v2 format
+    if (encryptedText.startsWith("v2:")) {
+        const parts = encryptedText.slice(3).split(":");
+        if (parts.length !== 3)
+            throw new Error("Invalid v2 format");
+        const [ivHex, encHex, tagHex] = parts;
+        const iv = Buffer.from(ivHex, "hex");
+        const encrypted = Buffer.from(encHex, "hex");
+        const tag = Buffer.from(tagHex, "hex");
+        const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+        decipher.setAuthTag(tag);
+        return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
+    }
+    // Legacy format (v1): iv:encrypted:tag — keep backward compat
+    const parts = encryptedText.split(":");
+    if (parts.length !== 3)
+        throw new Error("Invalid encrypted format");
+    const [ivHex, encHex, tagHex] = parts;
     const iv = Buffer.from(ivHex, "hex");
-    const encrypted = Buffer.from(encHex, "hex");
+    const encryptedBuf = Buffer.from(encHex, "hex");
     const tag = Buffer.from(tagHex, "hex");
     const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
     decipher.setAuthTag(tag);
-    return decipher.update(encrypted).toString("utf8") + decipher.final("utf8");
+    return Buffer.concat([decipher.update(encryptedBuf), decipher.final()]).toString("utf8");
 }
 // ── Category / type helpers ───────────────────────────────────────────────────
 function mapPlaidType(type, subtype) {
@@ -218,8 +268,11 @@ function setCors(res) {
 }
 // ── Functions base URL (for embedding in HTML pages) ─────────────────────────
 function getFunctionsBase() {
-    // GCLOUD_PROJECT is auto-set in Cloud Functions
+    // FIX 17 — Warn on missing GCLOUD_PROJECT
     const project = process.env.GCLOUD_PROJECT || "fortifyai";
+    if (!process.env.GCLOUD_PROJECT) {
+        console.warn("[plaid] GCLOUD_PROJECT env var not set, falling back to 'fortifyai'");
+    }
     return `https://us-central1-${project}.cloudfunctions.net`;
 }
 // ── plaidLinkToken ────────────────────────────────────────────────────────────
@@ -252,6 +305,11 @@ exports.plaidLinkToken = (0, https_1.onRequest)({
         res.status(401).json({ error: "Invalid token" });
         return;
     }
+    // FIX 5 — Rate limiting: 10 requests per 10 minutes per user
+    if (!checkRateLimit(`plaidLinkToken:${uid}`, 10, 10 * 60 * 1000)) {
+        res.status(429).json({ error: "Too many requests. Please wait before trying again." });
+        return;
+    }
     try {
         const plaid = getPlaidClient();
         const redirectUri = process.env.PLAID_REDIRECT_URI || undefined;
@@ -263,9 +321,9 @@ exports.plaidLinkToken = (0, https_1.onRequest)({
             language: "en",
             redirect_uri: redirectUri,
         });
-        // Store short-lived session in Firestore (expires in 10 minutes)
+        // FIX 21 — Extend session TTL to 30 minutes
         const sessionToken = crypto.randomBytes(32).toString("hex");
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+        const expiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
         await admin.firestore().collection("plaid_sessions").doc(sessionToken).set({
             uid,
             link_token: linkResp.data.link_token,
@@ -302,6 +360,20 @@ exports.plaidLink = (0, https_1.onRequest)({
         if (expiresAt.toDate() < new Date()) {
             res.status(400).send("Session expired. Return to Thrive and try again.");
             return;
+        }
+        // FIX 4 — Verify the requesting user owns this session
+        const authHeader = req.headers.authorization;
+        if (authHeader?.startsWith("Bearer ")) {
+            try {
+                const decoded = await admin.auth().verifyIdToken(authHeader.slice(7));
+                if (decoded.uid !== data.uid) {
+                    res.status(403).send("Forbidden");
+                    return;
+                }
+            }
+            catch {
+                // Token invalid - still allow if session is valid (mobile flow may not send token)
+            }
         }
         const linkToken = data.link_token;
         const base = getFunctionsBase();
@@ -420,27 +492,41 @@ exports.plaidExchangeToken = (0, https_1.onRequest)({
     }
     try {
         const db = admin.firestore();
-        // Validate and consume session token (single-use)
+        // FIX 6 — Atomically validate and delete session to prevent race condition
         const sessionRef = db.collection("plaid_sessions").doc(session_token);
-        const sessionDoc = await sessionRef.get();
-        if (!sessionDoc.exists) {
-            res.status(401).json({ error: "Invalid or expired session" });
-            return;
+        let sessionData;
+        try {
+            await db.runTransaction(async (txn) => {
+                const sessionSnap = await txn.get(sessionRef);
+                if (!sessionSnap.exists)
+                    throw new Error("not_found");
+                const data = sessionSnap.data();
+                if (data.expires_at.toDate() < new Date())
+                    throw new Error("expired");
+                sessionData = data;
+                txn.delete(sessionRef);
+            });
         }
-        const sessionData = sessionDoc.data();
-        if (sessionData.expires_at.toDate() < new Date()) {
-            res.status(401).json({ error: "Session expired" });
+        catch (e) {
+            const msg = e.message;
+            if (msg === "not_found") {
+                res.status(404).json({ error: "Session not found" });
+                return;
+            }
+            if (msg === "expired") {
+                res.status(401).json({ error: "Session expired" });
+                return;
+            }
+            res.status(401).json({ error: "Invalid session" });
             return;
         }
         const uid = sessionData.uid;
-        // Invalidate session immediately (single-use)
-        await sessionRef.delete();
         const plaid = getPlaidClient();
         // Exchange public token for access token
         const exchangeResp = await plaid.itemPublicTokenExchange({ public_token });
         const { access_token, item_id } = exchangeResp.data;
-        // Store encrypted access token in Firestore
-        const encryptedToken = encrypt(access_token, getEncryptionKey());
+        // Store encrypted access token in Firestore using new v2 encrypt (no keyHex arg)
+        const encryptedToken = encrypt(access_token);
         const institutionName = institution_name || "Connected Bank";
         await db.collection("users").doc(uid).collection("plaid_items").doc(item_id).set({
             access_token: encryptedToken,
@@ -453,11 +539,17 @@ exports.plaidExchangeToken = (0, https_1.onRequest)({
         const plaidAccounts = accountsResp.data.accounts;
         const batch = db.batch();
         for (const acc of plaidAccounts) {
+            // FIX 7 — Validate Plaid account data before writing
+            if (!acc.account_id || typeof acc.balances?.current !== "number") {
+                console.warn("[plaid] Skipping invalid account:", acc.account_id);
+                continue;
+            }
+            const balance = isFinite(acc.balances.current) ? acc.balances.current : 0;
+            const name = typeof acc.name === "string" ? acc.name.slice(0, 255) : "Unknown Account";
             const type = mapPlaidType(acc.type, acc.subtype ?? null);
-            const balance = acc.balances.current ?? 0;
             const accountRef = db.collection("users").doc(uid).collection("accounts").doc(`plaid_${acc.account_id}`);
             batch.set(accountRef, {
-                name: acc.name,
+                name,
                 institution: institutionName,
                 type,
                 balance,
@@ -484,6 +576,11 @@ exports.plaidExchangeToken = (0, https_1.onRequest)({
             const { transactions, total_transactions } = txResp.data;
             const txBatch = db.batch();
             for (const tx of transactions) {
+                // FIX 7 — Validate transaction data before writing
+                if (!tx.transaction_id || typeof tx.amount !== "number" || !isFinite(tx.amount)) {
+                    continue;
+                }
+                const description = typeof tx.name === "string" ? tx.name.slice(0, 500) : "";
                 const amount = tx.amount * -1; // Plaid: positive = debit; flip for our convention
                 const primary = tx.personal_finance_category?.primary || tx.category?.[0] || "Other";
                 const detailed = tx.personal_finance_category?.detailed || tx.category?.[1] || "";
@@ -492,7 +589,7 @@ exports.plaidExchangeToken = (0, https_1.onRequest)({
                 txBatch.set(txRef, {
                     accountId: `plaid_${tx.account_id}`,
                     date: tx.date,
-                    description: tx.name,
+                    description,
                     amount,
                     category,
                     merchant: tx.merchant_name || null,
@@ -505,7 +602,9 @@ exports.plaidExchangeToken = (0, https_1.onRequest)({
             if (offset >= total_transactions)
                 break;
         }
-        console.log(`[plaidExchangeToken] uid=${uid} accounts=${plaidAccounts.length} transactions=${totalInserted}`);
+        // FIX 19 — Audit log Plaid connect
+        await auditLog(db, "plaid_connect", uid, { itemId: item_id });
+        console.log(`[plaidExchangeToken] uid_hash=${shortHash(uid)} accounts=${plaidAccounts.length} transactions=${totalInserted}`);
         res.json({ success: true, accounts_synced: plaidAccounts.length });
     }
     catch (err) {
@@ -546,6 +645,15 @@ exports.plaidSyncTransactions = (0, https_1.onRequest)({
     }
     try {
         const db = admin.firestore();
+        // FIX 15 — Optional idempotency support
+        const idempotencyKey = req.headers["idempotency-key"];
+        if (idempotencyKey) {
+            const existing = await db.collection("idempotency_keys").doc(idempotencyKey).get();
+            if (existing.exists) {
+                res.status(200).json({ ok: true, cached: true });
+                return;
+            }
+        }
         const plaid = getPlaidClient();
         const itemsSnap = await db.collection("users").doc(uid).collection("plaid_items").get();
         if (itemsSnap.empty) {
@@ -553,6 +661,7 @@ exports.plaidSyncTransactions = (0, https_1.onRequest)({
             return;
         }
         let totalSynced = 0;
+        let totalAccountsCount = 0;
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - 90);
         for (const itemDoc of itemsSnap.docs) {
@@ -570,6 +679,11 @@ exports.plaidSyncTransactions = (0, https_1.onRequest)({
                 const { transactions, total_transactions } = txResp.data;
                 const txBatch = db.batch();
                 for (const tx of transactions) {
+                    // FIX 7 — Validate transaction data before writing
+                    if (!tx.transaction_id || typeof tx.amount !== "number" || !isFinite(tx.amount)) {
+                        continue;
+                    }
+                    const description = typeof tx.name === "string" ? tx.name.slice(0, 500) : "";
                     const amount = tx.amount * -1;
                     const primary = tx.personal_finance_category?.primary || tx.category?.[0] || "Other";
                     const detailed = tx.personal_finance_category?.detailed || tx.category?.[1] || "";
@@ -578,7 +692,7 @@ exports.plaidSyncTransactions = (0, https_1.onRequest)({
                     txBatch.set(txRef, {
                         accountId: `plaid_${tx.account_id}`,
                         date: tx.date,
-                        description: tx.name,
+                        description,
                         amount,
                         category,
                         merchant: tx.merchant_name || null,
@@ -595,17 +709,33 @@ exports.plaidSyncTransactions = (0, https_1.onRequest)({
             const accountsResp = await plaid.accountsGet({ access_token });
             const accBatch = db.batch();
             for (const acc of accountsResp.data.accounts) {
+                // FIX 7 — Validate account data before writing
+                if (!acc.account_id || typeof acc.balances?.current !== "number") {
+                    console.warn("[plaid] Skipping invalid account:", acc.account_id);
+                    continue;
+                }
+                const balance = isFinite(acc.balances.current) ? acc.balances.current : 0;
                 const type = mapPlaidType(acc.type, acc.subtype ?? null);
                 const accRef = db.collection("users").doc(uid).collection("accounts").doc(`plaid_${acc.account_id}`);
                 accBatch.set(accRef, {
-                    balance: acc.balances.current ?? 0,
+                    balance,
                     institution: institutionName,
                     type,
                     color: typeColor(type),
                     lastUpdated: new Date().toISOString(),
                 }, { merge: true });
+                totalAccountsCount++;
             }
             await accBatch.commit();
+        }
+        // FIX 19 — Audit log Plaid sync
+        await auditLog(db, "plaid_sync", uid, { accountsCount: totalAccountsCount, txCount: totalSynced });
+        // FIX 15 — Store idempotency key after successful sync
+        if (idempotencyKey) {
+            await db.collection("idempotency_keys").doc(idempotencyKey).set({
+                uid,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
         }
         res.json({ success: true, synced: totalSynced });
     }

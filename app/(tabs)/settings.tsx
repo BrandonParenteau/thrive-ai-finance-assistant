@@ -12,6 +12,7 @@ import {
   Switch,
   Linking,
   ActivityIndicator,
+  Keyboard,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -21,10 +22,19 @@ import * as Notifications from "expo-notifications";
 import * as WebBrowser from "expo-web-browser";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
+import { doc, updateDoc, getDoc } from "firebase/firestore";
 import Colors from "@/constants/colors";
 import { useAuth } from "@/context/AuthContext";
 import { useFinance } from "@/context/FinanceContext";
 import { getFunctionsUrl } from "@/lib/functions";
+import { db } from "@/lib/firebase";
+import { usePro } from "@/hooks/usePro";
+import PaywallModal from "@/components/PaywallModal";
+import {
+  PROVINCES,
+  DEFAULT_TAX_PROFILE,
+  type TaxProfile,
+} from "@/utils/canadianTaxRates";
 
 const C = Colors.dark;
 
@@ -34,6 +44,8 @@ const NOTIF_KEYS = {
   budgetAlerts: "thrive_notif_budget_alerts",
   monthlySummary: "thrive_notif_monthly_summary",
   billReminders: "thrive_notif_bill_reminders",
+  rrspDeadline: "thrive_notif_rrsp_deadline",
+  tfsaNewRoom: "thrive_notif_tfsa_new_room",
 };
 
 const BIOMETRIC_KEY = "thrive_biometric_enabled";
@@ -144,7 +156,7 @@ function DeleteAccountModal({ visible, onClose }: { visible: boolean; onClose: (
               : <Text style={[styles.modalSaveText, { color: C.negative }]}>Delete</Text>}
           </Pressable>
         </View>
-        <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }}>
+        <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
           <Text style={[styles.fieldLabel, { fontSize: 14, lineHeight: 20 }]}>
             This will permanently delete your account and all associated data. Enter your password to confirm.
           </Text>
@@ -213,7 +225,7 @@ function ChangePasswordModal({ visible, onClose }: { visible: boolean; onClose: 
               : <Text style={styles.modalSaveText}>Save</Text>}
           </Pressable>
         </View>
-        <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }}>
+        <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
           {error ? <View style={styles.errorBanner}><Text style={styles.errorText}>{error}</Text></View> : null}
           <View style={styles.fieldGroup}>
             <Text style={styles.fieldLabel}>Current Password</Text>
@@ -257,6 +269,160 @@ function ChangePasswordModal({ visible, onClose }: { visible: boolean; onClose: 
   );
 }
 
+// ── Tax Profile Modal ─────────────────────────────────────────────────────────
+
+function TaxProfileModal({
+  visible,
+  initial,
+  onSave,
+  onClose,
+}: {
+  visible: boolean;
+  initial: TaxProfile;
+  onSave: (profile: TaxProfile) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [province, setProvince] = useState(initial.province);
+  const [birthYear, setBirthYear] = useState(initial.birthYear.toString());
+  const [rrspRoom, setRrspRoom] = useState(initial.rrspAvailableRoom.toString());
+  const [fhsaYear, setFhsaYear] = useState(initial.fhsaYearOpened?.toString() ?? "");
+  const [showProvincePicker, setShowProvincePicker] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (visible) {
+      setProvince(initial.province);
+      setBirthYear(initial.birthYear.toString());
+      setRrspRoom(initial.rrspAvailableRoom.toString());
+      setFhsaYear(initial.fhsaYearOpened?.toString() ?? "");
+      setError("");
+    }
+  }, [visible, initial]);
+
+  const handleSave = async () => {
+    const by = parseInt(birthYear);
+    if (isNaN(by) || by < 1920 || by > 2010) { setError("Enter a valid birth year (1920–2010)"); return; }
+    const rrsp = parseFloat(rrspRoom) || 0;
+    const fhsa = fhsaYear ? parseInt(fhsaYear) : null;
+    if (fhsa !== null && (isNaN(fhsa) || fhsa < 2023)) { setError("FHSA year must be 2023 or later"); return; }
+    setLoading(true);
+    try {
+      await onSave({ province, birthYear: by, rrspAvailableRoom: rrsp, fhsaYearOpened: fhsa });
+      onClose();
+    } catch (e: any) {
+      setError(e.message || "Failed to save");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const selectedProvinceName = PROVINCES.find((p) => p.code === province)?.name ?? province;
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={styles.modalContainer}>
+        <View style={styles.modalHeader}>
+          <Pressable onPress={onClose} style={styles.modalCancelBtn}>
+            <Text style={styles.modalCancelText}>Cancel</Text>
+          </Pressable>
+          <Text style={styles.modalTitle}>Tax Profile</Text>
+          <Pressable onPress={handleSave} disabled={loading} style={styles.modalSaveBtn}>
+            {loading
+              ? <ActivityIndicator color={C.tint} size="small" />
+              : <Text style={styles.modalSaveText}>Save</Text>}
+          </Pressable>
+        </View>
+
+        <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
+          <Text style={[styles.fieldLabel, { fontSize: 13, color: C.textMuted, lineHeight: 18 }]}>
+            Your tax profile is used to calculate TFSA/RRSP contribution room and personalize AI tax optimization tips.
+          </Text>
+
+          {error ? <View style={styles.errorBanner}><Text style={styles.errorText}>{error}</Text></View> : null}
+
+          {/* Province */}
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>Province / Territory</Text>
+            <Pressable
+              style={[styles.fieldInput, { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}
+              onPress={() => setShowProvincePicker((v) => !v)}
+            >
+              <Text style={{ fontFamily: "DM_Sans_400Regular", fontSize: 15, color: C.text }}>
+                {selectedProvinceName}
+              </Text>
+              <Ionicons name={showProvincePicker ? "chevron-up" : "chevron-down"} size={16} color={C.textMuted} />
+            </Pressable>
+            {showProvincePicker && (
+              <View style={taxProfileStyles.provincePicker}>
+                {PROVINCES.map((p) => (
+                  <Pressable
+                    key={p.code}
+                    style={[taxProfileStyles.provinceRow, province === p.code && taxProfileStyles.provinceRowSelected]}
+                    onPress={() => { setProvince(p.code); setShowProvincePicker(false); }}
+                  >
+                    <Text style={[taxProfileStyles.provinceText, province === p.code && { color: C.tint, fontFamily: "DM_Sans_600SemiBold" }]}>
+                      {p.name}
+                    </Text>
+                    {province === p.code && <Ionicons name="checkmark" size={16} color={C.tint} />}
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </View>
+
+          {/* Birth Year */}
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>Birth Year</Text>
+            <TextInput
+              style={styles.fieldInput}
+              value={birthYear}
+              onChangeText={setBirthYear}
+              keyboardType="number-pad"
+              placeholder="e.g. 1990"
+              placeholderTextColor={C.textMuted}
+              maxLength={4}
+            />
+          </View>
+
+          {/* RRSP Available Room */}
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>RRSP Available Room (optional — overrides auto-calculation)</Text>
+            <View style={[styles.fieldInput, { flexDirection: "row", alignItems: "center", padding: 0, overflow: "hidden" }]}>
+              <Text style={{ paddingHorizontal: 14, fontFamily: "DM_Sans_600SemiBold", fontSize: 16, color: C.textSecondary }}>$</Text>
+              <TextInput
+                style={{ flex: 1, fontFamily: "DM_Sans_400Regular", fontSize: 15, color: C.text, paddingVertical: 12, paddingRight: 14 }}
+                value={rrspRoom}
+                onChangeText={setRrspRoom}
+                keyboardType="decimal-pad"
+                placeholder="0.00"
+                placeholderTextColor={C.textMuted}
+              />
+            </View>
+            <Text style={[styles.fieldLabel, { fontSize: 11, marginTop: 2 }]}>
+              Unused room carries forward each year. Auto-calculation only estimates this year's new room. For your true total (including prior years), enter the figure from CRA My Account or your Notice of Assessment.
+            </Text>
+          </View>
+
+          {/* FHSA Year Opened */}
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>FHSA Year Opened (leave blank if none)</Text>
+            <TextInput
+              style={styles.fieldInput}
+              value={fhsaYear}
+              onChangeText={setFhsaYear}
+              keyboardType="number-pad"
+              placeholder="e.g. 2023"
+              placeholderTextColor={C.textMuted}
+              maxLength={4}
+            />
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
 // ── Main Screen ───────────────────────────────────────────────────────────────
 
 export default function SettingsScreen() {
@@ -279,9 +445,18 @@ export default function SettingsScreen() {
   const [budgetAlerts, setBudgetAlerts] = useState(false);
   const [monthlySummary, setMonthlySummary] = useState(false);
   const [billReminders, setBillReminders] = useState(false);
+  const [rrspDeadline, setRrspDeadline] = useState(false);
+  const [tfsaNewRoom, setTfsaNewRoom] = useState(false);
 
-  // Subscription
-  const [plan] = useState<"Free" | "Pro">("Free");
+  // Tax Profile
+  const [taxProfile, setTaxProfile] = useState<TaxProfile>(DEFAULT_TAX_PROFILE);
+  const [showTaxProfile, setShowTaxProfile] = useState(false);
+
+  // Subscription / RevenueCat
+  const { isPro, openPaywall, restore } = usePro();
+  const plan = isPro ? "Pro" : "Free";
+  const [restoringPurchases, setRestoringPurchases] = useState(false);
+  const [paywallVisible, setPaywallVisible] = useState(false);
 
   // Plaid
   const [connecting, setConnecting] = useState(false);
@@ -308,15 +483,29 @@ export default function SettingsScreen() {
       const savedBiometric = await AsyncStorage.getItem(BIOMETRIC_KEY);
       setBiometricEnabled(savedBiometric === "true");
 
+      // Tax profile
+      if (user) {
+        try {
+          const snap = await getDoc(doc(db, "users", user.id));
+          if (snap.exists() && snap.data().tax_profile) {
+            setTaxProfile({ ...DEFAULT_TAX_PROFILE, ...snap.data().tax_profile });
+          }
+        } catch { /* non-critical */ }
+      }
+
       // Notifications
-      const [ba, ms, br] = await Promise.all([
+      const [ba, ms, br, rd, tr] = await Promise.all([
         AsyncStorage.getItem(NOTIF_KEYS.budgetAlerts),
         AsyncStorage.getItem(NOTIF_KEYS.monthlySummary),
         AsyncStorage.getItem(NOTIF_KEYS.billReminders),
+        AsyncStorage.getItem(NOTIF_KEYS.rrspDeadline),
+        AsyncStorage.getItem(NOTIF_KEYS.tfsaNewRoom),
       ]);
       setBudgetAlerts(ba === "true");
       setMonthlySummary(ms === "true");
       setBillReminders(br === "true");
+      setRrspDeadline(rd === "true");
+      setTfsaNewRoom(tr === "true");
     })();
   }, []);
 
@@ -354,9 +543,14 @@ export default function SettingsScreen() {
       budgetAlerts: setBudgetAlerts,
       monthlySummary: setMonthlySummary,
       billReminders: setBillReminders,
+      rrspDeadline: setRrspDeadline,
+      tfsaNewRoom: setTfsaNewRoom,
     };
     setters[key](value);
     await AsyncStorage.setItem(NOTIF_KEYS[key], String(value));
+    if (key === "rrspDeadline" || key === "tfsaNewRoom") {
+      await scheduleTaxNotification(key, value);
+    }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   }, []);
 
@@ -416,18 +610,72 @@ export default function SettingsScreen() {
     }
   }, [token]);
 
-  const handleUpgradePro = useCallback(() => {
-    // RevenueCat paywall — requires native build with react-native-purchases
-    Alert.alert(
-      "Upgrade to Pro",
-      "Pro features including unlimited AI insights, advanced budgeting, and priority support.\n\nFull in-app purchase requires a production build.",
-      [{ text: "Got It" }]
-    );
+  const handleSaveTaxProfile = useCallback(async (profile: TaxProfile) => {
+    if (!user) return;
+    await updateDoc(doc(db, "users", user.id), { tax_profile: profile });
+    setTaxProfile(profile);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  }, [user]);
+
+  const scheduleTaxNotification = useCallback(async (key: "rrspDeadline" | "tfsaNewRoom", enable: boolean) => {
+    const notifId = `thrive_sched_${key}`;
+    if (!enable) {
+      await Notifications.cancelScheduledNotificationAsync(notifId).catch(() => {});
+      return;
+    }
+    const now = new Date();
+    if (key === "rrspDeadline") {
+      // Feb 14 reminder each year (2 weeks before March 1 deadline)
+      const nextYear = now.getMonth() >= 1 ? now.getFullYear() + 1 : now.getFullYear();
+      await Notifications.scheduleNotificationAsync({
+        identifier: notifId,
+        content: {
+          title: "RRSP Deadline in 2 Weeks",
+          body: "March 2 is the RRSP contribution deadline. Contributions lower your taxable income — open Thrive to check your available room.",
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+          year: nextYear, month: 2, day: 14, hour: 9, minute: 0,
+          repeats: true,
+        },
+      }).catch(() => {});
+    } else {
+      // Jan 2 reminder each year (TFSA/FHSA new room)
+      const nextYear = now.getMonth() >= 0 ? now.getFullYear() + 1 : now.getFullYear();
+      await Notifications.scheduleNotificationAsync({
+        identifier: notifId,
+        content: {
+          title: "New TFSA & FHSA Room Available",
+          body: `$7,000 of new TFSA contribution room is available today. Open Thrive to see your updated limits.`,
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+          year: nextYear, month: 1, day: 2, hour: 9, minute: 0,
+          repeats: true,
+        },
+      }).catch(() => {});
+    }
   }, []);
 
-  const handleRestorePurchases = useCallback(() => {
-    Alert.alert("Restore Purchases", "No purchases found to restore.", [{ text: "OK" }]);
+  const handleUpgradePro = useCallback(() => {
+    setPaywallVisible(true);
   }, []);
+
+  const handleRestorePurchases = useCallback(async () => {
+    setRestoringPurchases(true);
+    try {
+      const active = await restore();
+      if (active) {
+        Alert.alert("Restored!", "Your Pro subscription has been restored.");
+      } else {
+        Alert.alert("No purchases found", "No active subscription found to restore.");
+      }
+    } catch {
+      Alert.alert("Restore failed", "Please try again.");
+    } finally {
+      setRestoringPurchases(false);
+    }
+  }, [restore]);
 
   // ── Initials avatar ───────────────────────────────────────────────────────
 
@@ -493,10 +741,10 @@ export default function SettingsScreen() {
             icon="star-outline"
             iconColor={C.gold}
             label="Current Plan"
-            value={plan}
+            value={isPro ? "Pro ✓" : "Free"}
             chevron={false}
           />
-          {plan === "Free" && (
+          {!isPro && (
             <>
               <RowDivider />
               <SettingsRow
@@ -510,10 +758,16 @@ export default function SettingsScreen() {
           <RowDivider />
           <SettingsRow
             icon="refresh-outline"
-            label="Restore Purchases"
+            label={restoringPurchases ? "Restoring…" : "Restore Purchases"}
             onPress={handleRestorePurchases}
+            disabled={restoringPurchases}
           />
         </Card>
+        <PaywallModal
+          visible={paywallVisible}
+          onClose={() => setPaywallVisible(false)}
+          onSubscribed={() => setPaywallVisible(false)}
+        />
 
         {/* ── Security ── */}
         <SectionHeader title="Security" />
@@ -544,12 +798,14 @@ export default function SettingsScreen() {
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionHeader}>Connected Accounts</Text>
           <Pressable
-            onPress={handleConnectPlaid}
+            onPress={isPro ? handleConnectPlaid : openPaywall}
             disabled={connecting}
             style={styles.sectionAddBtn}
           >
             {connecting
               ? <ActivityIndicator size="small" color={C.tint} />
+              : !isPro
+              ? <Ionicons name="lock-closed" size={16} color={C.tint} />
               : <Ionicons name="add" size={18} color={C.tint} />}
           </Pressable>
         </View>
@@ -582,6 +838,34 @@ export default function SettingsScreen() {
               </View>
             ))
           )}
+        </Card>
+
+        {/* ── Tax Profile ── */}
+        <SectionHeader title="Canadian Tax Profile" />
+        <Card>
+          <SettingsRow
+            icon="document-text-outline"
+            iconColor={C.gold}
+            label="Tax Profile"
+            value={taxProfile.province}
+            onPress={() => setShowTaxProfile(true)}
+          />
+          <RowDivider />
+          <SettingsRow
+            icon="calendar-number-outline"
+            iconColor="#56CFE1"
+            label="RRSP Contribution Room"
+            value={`$${Math.round(taxProfile.rrspAvailableRoom).toLocaleString("en-CA")}`}
+            chevron={false}
+          />
+          <RowDivider />
+          <SettingsRow
+            icon="home-outline"
+            iconColor={C.tint}
+            label="FHSA"
+            value={taxProfile.fhsaYearOpened ? `Since ${taxProfile.fhsaYearOpened}` : "Not opened"}
+            chevron={false}
+          />
         </Card>
 
         {/* ── Notifications ── */}
@@ -625,6 +909,38 @@ export default function SettingsScreen() {
                 onValueChange={(v) => handleNotifToggle("billReminders", v)}
                 trackColor={{ false: C.border, true: `${C.tint}88` }}
                 thumbColor={billReminders ? C.tint : C.textMuted}
+              />
+            }
+          />
+          <RowDivider />
+          <SettingsRow
+            icon="trending-down-outline"
+            iconColor="#56CFE1"
+            label="RRSP Deadline Reminder"
+            value="Mar 2"
+            chevron={false}
+            rightElement={
+              <Switch
+                value={rrspDeadline}
+                onValueChange={(v) => handleNotifToggle("rrspDeadline", v)}
+                trackColor={{ false: C.border, true: `${"#56CFE1"}88` }}
+                thumbColor={rrspDeadline ? "#56CFE1" : C.textMuted}
+              />
+            }
+          />
+          <RowDivider />
+          <SettingsRow
+            icon="leaf-outline"
+            iconColor={C.tint}
+            label="TFSA / FHSA New Room"
+            value="Jan 2"
+            chevron={false}
+            rightElement={
+              <Switch
+                value={tfsaNewRoom}
+                onValueChange={(v) => handleNotifToggle("tfsaNewRoom", v)}
+                trackColor={{ false: C.border, true: `${C.tint}88` }}
+                thumbColor={tfsaNewRoom ? C.tint : C.textMuted}
               />
             }
           />
@@ -680,6 +996,12 @@ export default function SettingsScreen() {
 
       <ChangePasswordModal visible={showChangePassword} onClose={() => setShowChangePassword(false)} />
       <DeleteAccountModal visible={showDeleteAccount} onClose={() => setShowDeleteAccount(false)} />
+      <TaxProfileModal
+        visible={showTaxProfile}
+        initial={taxProfile}
+        onSave={handleSaveTaxProfile}
+        onClose={() => setShowTaxProfile(false)}
+      />
     </View>
   );
 }
@@ -909,5 +1231,34 @@ const styles = StyleSheet.create({
     fontFamily: "DM_Sans_400Regular",
     fontSize: 13,
     color: C.negative,
+  },
+});
+
+const taxProfileStyles = StyleSheet.create({
+  provincePicker: {
+    backgroundColor: C.elevated,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    marginTop: 4,
+    overflow: "hidden",
+    maxHeight: 280,
+  },
+  provinceRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  provinceRowSelected: {
+    backgroundColor: `${C.tint}10`,
+  },
+  provinceText: {
+    fontFamily: "DM_Sans_400Regular",
+    fontSize: 15,
+    color: C.text,
   },
 });
