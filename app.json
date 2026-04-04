@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.brandonparenteau.Fortifyai",
-      "buildNumber": "34",
+      "buildNumber": "37",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSFaceIDUsageDescription": "Thrive uses Face ID to securely unlock your financial data.",
@@ -79,9 +79,9 @@
           "backgroundColor": "#0A1A12"
         }
       ],
-      "react-native-iap",
       "expo-build-properties",
       "expo-secure-store",
+      "./plugins/withPodfileModularHeaders",
       "./plugins/withExceptionHandler"
     ],
     "experiments": {
