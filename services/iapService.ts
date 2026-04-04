@@ -21,12 +21,12 @@
  *     → onSuccess(isPro)
  */
 
-import { Platform, type EmitterSubscription } from "react-native";
+import { Platform } from "react-native";
 import {
   initConnection,
   endConnection,
-  getSubscriptions,
-  requestSubscription,
+  fetchProducts,
+  requestPurchase,
   getAvailablePurchases,
   purchaseUpdatedListener,
   purchaseErrorListener,
@@ -34,13 +34,14 @@ import {
   getReceiptIOS,
   type Purchase,
   type PurchaseError,
+  type EventSubscription,
 } from "react-native-iap";
 import { postReceipt, type ThriveOfferings, type ThrivePackage } from "./revenueCat";
 
 // ─── Module-level state ───────────────────────────────────────────────────────
 
-let _purchaseListener: EmitterSubscription | null = null;
-let _errorListener: EmitterSubscription | null = null;
+let _purchaseListener: EventSubscription | null = null;
+let _errorListener: EventSubscription | null = null;
 let _appUserId: string | null = null;
 let _onSuccess: ((isPro: boolean) => void) | null = null;
 let _onError: ((err: PurchaseError) => void) | null = null;
@@ -101,7 +102,7 @@ export function setupPurchaseListeners(
     try {
       const receipt =
         Platform.OS === "ios"
-          ? await getReceiptIOS({ forceRefresh: false })
+          ? await getReceiptIOS()
           : (purchase.purchaseToken ?? "");
 
       if (!receipt || !_appUserId) {
@@ -156,12 +157,12 @@ export async function getSubscriptionProducts(skus: string[]): Promise<
 > {
   if (Platform.OS === "web" || !skus.length) return [];
   try {
-    const products = await getSubscriptions({ skus });
+    const products = await fetchProducts({ skus, type: "subs" });
     if (!products) return [];
     return products.map((p) => ({
-      productId: p.productId,
-      priceString: (p as any).localizedPrice ?? "",
-      price: Number((p as any).price ?? 0),
+      productId: p.id,
+      priceString: p.displayPrice,
+      price: Number(p.price ?? 0),
     }));
   } catch (err) {
     console.warn("[IAP] getSubscriptionProducts failed:", err);
@@ -208,8 +209,12 @@ export async function enrichOfferingsWithPrices(
  * in the purchaseUpdatedListener registered by setupPurchaseListeners().
  */
 export async function purchaseSubscription(sku: string): Promise<void> {
-  await requestSubscription({
-    sku,
+  await requestPurchase({
+    request:
+      Platform.OS === "ios"
+        ? { apple: { sku } }
+        : { google: { skus: [sku] } },
+    type: "subs",
   });
 }
 
@@ -228,7 +233,7 @@ export async function restoreAndValidate(appUserId: string): Promise<boolean> {
   if (!purchases.length) return false;
 
   // On iOS we get one app-store-wide receipt that covers all transactions.
-  const iosReceipt = Platform.OS === "ios" ? await getReceiptIOS({ forceRefresh: false }).catch(() => null) : null;
+  const iosReceipt = Platform.OS === "ios" ? await getReceiptIOS().catch(() => null) : null;
 
   let isPro = false;
   for (const purchase of purchases) {
