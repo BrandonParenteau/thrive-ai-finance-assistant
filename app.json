@@ -81,7 +81,8 @@
       ],
       "react-native-iap",
       "expo-build-properties",
-      "expo-secure-store"
+      "expo-secure-store",
+      "./plugins/withExceptionHandler"
     ],
     "experiments": {
       "typedRoutes": true,
