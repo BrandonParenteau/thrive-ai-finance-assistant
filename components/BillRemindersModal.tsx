@@ -110,7 +110,7 @@ export default function BillRemindersModal({ visible, onClose }: Props) {
           minute: 0,
           repeats: true,
         },
-      });
+      }).catch(() => {});
     },
     []
   );
@@ -213,7 +213,7 @@ export default function BillRemindersModal({ visible, onClose }: Props) {
           onScrollBeginDrag={Keyboard.dismiss}
         >
           <Text style={styles.desc}>
-            Add your recurring bills and we'll remind you on the day they're due each month.
+            Add your recurring bills and we&apos;ll remind you on the day they&apos;re due each month.
           </Text>
 
           {/* Add new reminder */}

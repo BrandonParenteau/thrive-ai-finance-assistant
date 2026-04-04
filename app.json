@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "thrive",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/images/splash-icon.png",
       "resizeMode": "contain",
@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.brandonparenteau.Fortifyai",
-      "buildNumber": "7",
+      "buildNumber": "20",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSFaceIDUsageDescription": "Thrive uses Face ID to securely unlock your financial data.",
@@ -25,7 +25,9 @@
         "NSUserNotificationsUsageDescription": "Thrive sends you budget alerts, bill reminders, and your monthly financial summary."
       },
       "entitlements": {
-        "com.apple.developer.applesignin": ["Default"]
+        "com.apple.developer.applesignin": [
+          "Default"
+        ]
       }
     },
     "android": {
@@ -76,7 +78,10 @@
           "resizeMode": "contain",
           "backgroundColor": "#0A1A12"
         }
-      ]
+      ],
+      "react-native-iap",
+      "expo-build-properties",
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,

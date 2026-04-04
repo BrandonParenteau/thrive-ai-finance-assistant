@@ -164,7 +164,7 @@ export default function StatementUploadModal({ visible, onClose, onImport }: Pro
               <View style={s.tipBox}>
                 <Ionicons name="information-circle-outline" size={15} color={C.tint} />
                 <Text style={s.tipText}>
-                  Most Canadian banks offer a CSV export under "Download transactions" or "Export statement".
+                  Most Canadian banks offer a CSV export under &quot;Download transactions&quot; or &quot;Export statement&quot;.
                 </Text>
               </View>
               <Pressable style={s.pickBtn} onPress={pickAndParse} disabled={loading}>

@@ -179,7 +179,7 @@ export default function MonthlySummaryModal({ visible, onClose }: Props) {
           <View style={styles.emailNote}>
             <Ionicons name="mail-outline" size={16} color={C.textMuted} />
             <Text style={styles.emailNoteText}>
-              A full copy of this summary has been sent to your email. After closing, it won't be accessible here again.
+              A full copy of this summary has been sent to your email. After closing, it won&apos;t be accessible here again.
             </Text>
           </View>
 

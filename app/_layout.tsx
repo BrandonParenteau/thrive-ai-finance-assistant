@@ -13,7 +13,10 @@ import { Platform } from "react-native";
 // We rely on the router's built-in call and only call hideAsync() when ready.
 
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { KeyboardProvider } from "react-native-keyboard-controller";
+// react-native-keyboard-controller removed: bindings.native.js runs
+// new NativeEventEmitter(KeyboardControllerNative) at module-evaluation time,
+// which calls getConstants() on the KeyboardController TurboModule before Fabric
+// is ready — causing ObjCTurboModule::performVoidMethodInvocation to throw.
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ToastContainer } from "@/components/Toast";
 import { OfflineBanner } from "@/components/OfflineBanner";
@@ -30,13 +33,15 @@ import {
 import Constants from "expo-constants";
 import Colors from "@/constants/colors";
 import { registerPaywallCallback } from "@/hooks/usePro";
+import { initializeRevenueCat, setAppUserId } from "@/services/revenueCat";
+import { initIAP, setupPurchaseListeners, teardownIAP } from "@/services/iapService";
 import PaywallModal from "@/components/PaywallModal";
 import MonthlySummaryModal from "@/components/MonthlySummaryModal";
 import { registerMonthlySummaryCallback, openMonthlySummary } from "@/utils/monthlySummaryState";
 
-// ─── Global unhandled-promise-rejection logger ────────────────────────────────
-// Catches promise rejections that escape component try/catch blocks so they
-// appear in logs rather than crashing the app silently.
+// ─── Global error interceptors ────────────────────────────────────────────────
+// Log unhandled promise rejections so they surface in crash logs instead of
+// silently dropping.
 if (typeof global !== "undefined") {
   const _originalHandler = (global as any).onunhandledrejection;
   (global as any).onunhandledrejection = (event: any) => {
@@ -44,6 +49,23 @@ if (typeof global !== "undefined") {
     console.warn("[Unhandled Promise Rejection]", reason?.message ?? reason);
     _originalHandler?.(event);
   };
+
+  // Intercept the global ErrorUtils handler so any synchronous JS exception
+  // (including TurboModule crashes that bubble up as JS errors) is logged with
+  // a full stack trace before the process terminates. The original handler is
+  // still called so Sentry / Crashlytics integrations keep working.
+  const errorUtils = (global as any).ErrorUtils;
+  if (errorUtils) {
+    const _prev = errorUtils.getGlobalHandler?.();
+    errorUtils.setGlobalHandler?.((error: Error, isFatal: boolean) => {
+      console.error(
+        `[GlobalErrorHandler] fatal=${isFatal} module=${(error as any)?.nativeStackIOS?.[0] ?? "unknown"}\n` +
+        `message: ${error?.message}\n` +
+        `stack: ${error?.stack}`
+      );
+      _prev?.(error, isFatal);
+    });
+  }
 }
 
 // ─── Root navigation ──────────────────────────────────────────────────────────
@@ -98,22 +120,42 @@ function RootLayoutNav({ fontsReady }: { fontsReady: boolean }) {
     return () => sub.remove();
   }, []);
 
-  // Initialize RevenueCat once the user is known.
-  // Skip in Expo Go — native store is unavailable there.
+  // Initialize IAP + RevenueCat once the user is known.
+  // Uses REST API + react-native-iap — no RevenueCat native module.
+  // Skip in Expo Go — StoreKit is unavailable there.
   useEffect(() => {
     if (!user?.id || Platform.OS === "web") return;
     if (Constants.appOwnership === "expo") return; // Expo Go
     (async () => {
       try {
-        const Purchases = require("react-native-purchases").default;
-        const apiKey = Platform.OS === "ios"
-          ? process.env.EXPO_PUBLIC_RC_IOS_KEY ?? ""
-          : process.env.EXPO_PUBLIC_RC_ANDROID_KEY ?? "";
-        if (!apiKey) return;
-        Purchases.configure({ apiKey });
-        await Purchases.logIn(user.id);
-      } catch { /* Expo Go or missing key — skip silently */ }
+        // 1. Store the user ID for all subsequent RevenueCat REST calls.
+        initializeRevenueCat();
+        setAppUserId(user.id);
+
+        // 2. Open the StoreKit / Play Billing connection.
+        const iapReady = await initIAP();
+        if (!iapReady) {
+          console.warn("[IAP] initConnection failed — purchases unavailable");
+          return;
+        }
+
+        // 3. Register purchase listeners so receipts are posted to RevenueCat
+        //    automatically when any purchase completes or is restored.
+        setupPurchaseListeners(
+          user.id,
+          (isPro) => console.log("[RevenueCat] purchase validated, isPro=", isPro),
+          (err) => console.warn("[IAP] purchase error:", err.message),
+        );
+
+        console.log("[RevenueCat] ready — REST mode, uid=", user.id);
+      } catch (err: any) {
+        console.error("[RevenueCat] init failed:", err?.message ?? err);
+      }
     })();
+
+    return () => {
+      teardownIAP().catch(() => {});
+    };
   }, [user?.id]);
 
   // Hide splash only once — guard with a ref to prevent duplicate calls.
@@ -182,9 +224,7 @@ export default function RootLayout() {
         <AuthProvider>
           <FinanceProvider>
             <GestureHandlerRootView style={{ flex: 1, backgroundColor: Colors.dark.background }}>
-              <KeyboardProvider>
-                <RootLayoutNav fontsReady={fontsReady} />
-              </KeyboardProvider>
+              <RootLayoutNav fontsReady={fontsReady} />
             </GestureHandlerRootView>
           </FinanceProvider>
         </AuthProvider>

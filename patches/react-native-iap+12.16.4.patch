@@ -1,0 +1,25 @@
+diff --git a/node_modules/react-native-iap/.DS_Store b/node_modules/react-native-iap/.DS_Store
+new file mode 100644
+index 0000000..8f73912
+Binary files /dev/null and b/node_modules/react-native-iap/.DS_Store differ
+diff --git a/node_modules/react-native-iap/ios/.DS_Store b/node_modules/react-native-iap/ios/.DS_Store
+new file mode 100644
+index 0000000..37004dd
+Binary files /dev/null and b/node_modules/react-native-iap/ios/.DS_Store differ
+diff --git a/node_modules/react-native-iap/ios/IapSerializationUtils.swift b/node_modules/react-native-iap/ios/IapSerializationUtils.swift
+index 800848a..d0ab1ba 100644
+--- a/node_modules/react-native-iap/ios/IapSerializationUtils.swift
++++ b/node_modules/react-native-iap/ios/IapSerializationUtils.swift
+@@ -204,12 +204,6 @@ func serialize(_ t: Transaction) -> [String: Any?] {
+         "webOrderLineItemID": t.webOrderLineItemID
+     ]
+ 
+-    #if compiler(>=5.10)
+-    if #available(iOS 15.2, tvOS 15.2, *) {
+-        result["appTransactionID"] = t.appTransactionID
+-    }
+-    #endif
+-
+     return result
+ }
+ @available(iOS 15.0, tvOS 15.0, *)

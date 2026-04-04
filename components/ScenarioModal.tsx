@@ -547,7 +547,7 @@ export default function ScenarioModal({
                   <View style={s.emptyState}>
                     <Ionicons name="analytics-outline" size={40} color={C.textMuted} />
                     <Text style={s.emptyStateText}>No saved scenarios yet</Text>
-                    <Text style={s.emptyStateSubtext}>Run a simulation and tap "Save Scenario"</Text>
+                    <Text style={s.emptyStateSubtext}>Run a simulation and tap &quot;Save Scenario&quot;</Text>
                   </View>
                 ) : (
                   savedScenarios.map((sc) => (

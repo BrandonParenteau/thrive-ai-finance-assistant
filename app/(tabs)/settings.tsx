@@ -406,7 +406,7 @@ function TaxProfileModal({
               />
             </View>
             <Text style={[styles.fieldLabel, { fontSize: 11, marginTop: 2 }]}>
-              Unused room carries forward each year. Auto-calculation only estimates this year's new room. For your true total (including prior years), enter the figure from CRA My Account or your Notice of Assessment.
+              Unused room carries forward each year. Auto-calculation only estimates this year&apos;s new room. For your true total (including prior years), enter the figure from CRA My Account or your Notice of Assessment.
             </Text>
           </View>
 
@@ -474,19 +474,21 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     (async () => {
-      // Biometrics
-      const hasHardware = await LocalAuthentication.hasHardwareAsync();
-      const isEnrolled = await LocalAuthentication.isEnrolledAsync();
-      setBiometricSupported(hasHardware && isEnrolled);
+      // Biometrics — wrapped in try/catch to prevent NSException → Hermes SIGSEGV
+      try {
+        const hasHardware = await LocalAuthentication.hasHardwareAsync();
+        const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+        setBiometricSupported(hasHardware && isEnrolled);
 
-      if (hasHardware) {
-        const types = await LocalAuthentication.supportedAuthenticationTypesAsync();
-        if (types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
-          setBiometricType("Face ID");
-        } else if (types.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
-          setBiometricType("Touch ID");
+        if (hasHardware) {
+          const types = await LocalAuthentication.supportedAuthenticationTypesAsync();
+          if (types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
+            setBiometricType("Face ID");
+          } else if (types.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
+            setBiometricType("Touch ID");
+          }
         }
-      }
+      } catch { /* biometric hardware unavailable — skip silently */ }
 
       const savedBiometric = await AsyncStorage.getItem(BIOMETRIC_KEY);
       setBiometricEnabled(savedBiometric === "true");
@@ -521,11 +523,13 @@ export default function SettingsScreen() {
 
   const handleBiometricToggle = useCallback(async (value: boolean) => {
     if (value) {
-      const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: `Enable ${biometricType} for Thrive`,
-        cancelLabel: "Cancel",
-      });
-      if (!result.success) return;
+      try {
+        const result = await LocalAuthentication.authenticateAsync({
+          promptMessage: `Enable ${biometricType} for Thrive`,
+          cancelLabel: "Cancel",
+        });
+        if (!result.success) return;
+      } catch { return; }
     }
     setBiometricEnabled(value);
     await AsyncStorage.setItem(BIOMETRIC_KEY, String(value));
@@ -534,7 +538,10 @@ export default function SettingsScreen() {
 
   const handleNotifToggle = useCallback(async (key: keyof typeof NOTIF_KEYS, value: boolean) => {
     if (value) {
-      const { status } = await Notifications.requestPermissionsAsync();
+      let status = "denied";
+      try {
+        ({ status } = await Notifications.requestPermissionsAsync());
+      } catch { /* permissions API unavailable */ }
       if (status !== "granted") {
         Alert.alert(
           "Notifications Disabled",
@@ -773,7 +780,10 @@ export default function SettingsScreen() {
       Alert.alert("Not Supported", "Push notifications are not available on web.");
       return;
     }
-    const { status } = await Notifications.requestPermissionsAsync();
+    let status = "denied";
+    try {
+      ({ status } = await Notifications.requestPermissionsAsync());
+    } catch { /* permissions API unavailable */ }
     if (status !== "granted") {
       Alert.alert(
         "Notifications Disabled",

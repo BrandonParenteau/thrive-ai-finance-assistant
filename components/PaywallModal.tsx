@@ -16,6 +16,9 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Colors from "@/constants/colors";
 import toast from "@/utils/toast";
 import { mapError, isCancelledByUser } from "@/utils/errorMessages";
+import { getOfferings, getAppUserId } from "@/services/revenueCat";
+import { enrichOfferingsWithPrices, purchaseSubscription, restoreAndValidate } from "@/services/iapService";
+import type { ThriveOfferings, ThrivePackage } from "@/services/revenueCat";
 
 const C = Colors.dark;
 
@@ -37,7 +40,7 @@ export default function PaywallModal({ visible, onClose, onSubscribed }: Props) 
   const [isAnnual, setIsAnnual] = useState(true);
   const [loading, setLoading] = useState(false);
   const [restoring, setRestoring] = useState(false);
-  const [offerings, setOfferings] = useState<any>(null);
+  const [offerings, setOfferings] = useState<ThriveOfferings | null>(null);
   const [noOfferings, setNoOfferings] = useState(false);
   const [success, setSuccess] = useState(false);
   const successScale = useRef(new Animated.Value(0)).current;
@@ -55,16 +58,20 @@ export default function PaywallModal({ visible, onClose, onSubscribed }: Props) 
     (async () => {
       try {
         if (Platform.OS === "web") return;
-        const Purchases = require("react-native-purchases").default;
-        const o = await Purchases.getOfferings();
-        if (o.current) {
-          setOfferings(o.current);
+        const userId = getAppUserId();
+        if (!userId) return;
+        // Fetch RevenueCat offerings (product IDs), then enrich with
+        // StoreKit prices from react-native-iap.
+        const raw = await getOfferings(userId);
+        const enriched = await enrichOfferingsWithPrices(raw);
+        if (enriched.availablePackages.length > 0) {
+          setOfferings(enriched);
           setNoOfferings(false);
         } else {
           setNoOfferings(true);
         }
       } catch {
-        // Offerings load failure is non-blocking — we fall back to hardcoded prices
+        // Non-blocking — fall back to hardcoded prices shown in the UI.
         setNoOfferings(false);
       }
     })();
@@ -103,17 +110,19 @@ export default function PaywallModal({ visible, onClose, onSubscribed }: Props) 
     purchaseInProgress.current = true;
     setLoading(true);
     try {
-      const Purchases = require("react-native-purchases").default;
-      const pkg = isAnnual
-        ? offerings?.annual ?? offerings?.availablePackages?.[0]
-        : offerings?.monthly ?? offerings?.availablePackages?.[0];
+      const pkg: ThrivePackage | undefined = isAnnual
+        ? (offerings?.annual ?? offerings?.availablePackages?.[0])
+        : (offerings?.monthly ?? offerings?.availablePackages?.[0]);
 
-      if (!pkg) {
+      if (!pkg?.productId) {
         toast.warning("No subscription packages found. If you're in TestFlight, this is expected — packages load from the App Store in production.");
         return;
       }
 
-      await Purchases.purchasePackage(pkg);
+      // purchaseSubscription triggers StoreKit; the purchaseUpdatedListener
+      // in _layout.tsx posts the receipt to RevenueCat and calls onSuccess.
+      // The promise resolves once StoreKit hands back the transaction.
+      await purchaseSubscription(pkg.productId);
       showSuccess(() => { onSubscribed(); onClose(); });
     } catch (e: any) {
       if (isCancelledByUser(e)) return; // User backed out — no toast needed
@@ -135,12 +144,16 @@ export default function PaywallModal({ visible, onClose, onSubscribed }: Props) 
     if (purchaseInProgress.current || loading || restoring) return;
     if (Platform.OS === "web") return;
 
+    const userId = getAppUserId();
+    if (!userId) {
+      Alert.alert("Unavailable", "Please sign in before restoring purchases.");
+      return;
+    }
+
     purchaseInProgress.current = true;
     setRestoring(true);
     try {
-      const Purchases = require("react-native-purchases").default;
-      const info = await Purchases.restorePurchases();
-      const active = !!info.entitlements.active["monthly"];
+      const active = await restoreAndValidate(userId);
       if (active) {
         showSuccess(() => { onSubscribed(); onClose(); });
       } else {
@@ -160,10 +173,10 @@ export default function PaywallModal({ visible, onClose, onSubscribed }: Props) 
   };
 
   // Hardcoded fallback prices (shown when offerings not loaded yet)
-  const monthlyPrice = offerings?.monthly?.product?.priceString ?? "$14.99";
-  const annualPrice = offerings?.annual?.product?.priceString ?? "$89.99";
-  const annualMonthly = offerings?.annual?.product?.price
-    ? `$${(offerings.annual.product.price / 12).toFixed(2)}/mo`
+  const monthlyPrice = offerings?.monthly?.priceString ?? "$14.99";
+  const annualPrice = offerings?.annual?.priceString ?? "$89.99";
+  const annualMonthly = offerings?.annual?.price
+    ? `$${(offerings.annual.price / 12).toFixed(2)}/mo`
     : "$7.50/mo";
 
   return (

@@ -9,10 +9,10 @@ import {
   Platform,
   ActivityIndicator,
   Keyboard,
+  KeyboardAvoidingView,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import Animated, {
   useSharedValue,
@@ -171,7 +171,7 @@ function MessageBubble({ message }: { message: Message }) {
           <BudgetActionCard action={message.action} />
         )}
         {/* Hallucination disclaimer for assistant messages with dollar amounts */}
-        {!isUser && !message.isError && displayContent.match(/\$[\d,]+/) && (
+        {!isUser && !message.isError && displayContent?.match(/\$[\d,]+/) && (
           <Text style={styles.disclaimer}>{AI_MESSAGES.HALLUCINATION_DISCLAIMER}</Text>
         )}
       </View>
@@ -187,7 +187,7 @@ function EmptyState({ onPrompt }: { onPrompt: (p: string) => void }) {
       </View>
       <Text style={styles.emptyTitle}>Your Finance Assistant</Text>
       <Text style={styles.emptySubtitle}>
-        Ask about your spending, or say "create a budget" and I'll build and apply one from your real transactions.
+        Ask about your spending, or say &quot;create a budget&quot; and I&apos;ll build and apply one from your real transactions.
       </Text>
       <View style={styles.quickPromptsGrid}>
         {QUICK_PROMPTS.map((p) => (

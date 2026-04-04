@@ -1,6 +1,17 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { initializeAuth, getAuth, type Persistence } from "firebase/auth";
+// getReactNativePersistence ships in the RN build of @firebase/auth but is
+// not exposed via the package's exports map. Metro resolves firebase/auth to
+// the RN bundle at runtime, so this import works on-device and in TestFlight.
+// The cast silences the TS error that stems from the missing type-only export.
+const { getReactNativePersistence } =
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  require("firebase/auth") as {
+    getReactNativePersistence: (storage: unknown) => Persistence;
+  };
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getFirestore } from "firebase/firestore";
+import { Platform } from "react-native";
 
 const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
@@ -12,9 +23,15 @@ const firebaseConfig = {
   measurementId: process.env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID,
 };
 
-// Metro automatically resolves firebase/auth to the React Native build
-// (dist/rn/index.js) which includes AsyncStorage persistence by default.
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-export const auth = getAuth(app);
+// On native, persist auth state with AsyncStorage so users stay logged in
+// across app restarts. On web, fall back to getAuth (uses localStorage).
+export const auth =
+  Platform.OS === "web"
+    ? getAuth(app)
+    : initializeAuth(app, {
+        persistence: getReactNativePersistence(AsyncStorage),
+      });
+
 export const db = getFirestore(app);

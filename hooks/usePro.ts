@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Platform, AppState } from "react-native";
 import toast from "@/utils/toast";
 import { mapError, isCancelledByUser } from "@/utils/errorMessages";
+import { getCustomerInfo, getAppUserId } from "@/services/revenueCat";
 
 export interface ProState {
   isPro: boolean;
@@ -23,11 +24,12 @@ export function usePro(): ProState {
 
   const refreshStatus = useCallback(async () => {
     if (Platform.OS === "web") { setIsLoading(false); return; }
+    const userId = getAppUserId();
+    if (!userId) { setIsLoading(false); return; }
     try {
-      const Purchases = require("react-native-purchases").default;
-      const info = await Purchases.getCustomerInfo();
+      const info = await getCustomerInfo(userId);
       if (mounted.current) {
-        setIsPro(!!info.entitlements.active["monthly"]);
+        setIsPro(info.isPro);
         setIsLoading(false);
       }
     } catch {
@@ -39,20 +41,8 @@ export function usePro(): ProState {
     mounted.current = true;
     refreshStatus();
 
-    // Listen for RevenueCat updates (purchases, renewals, refunds)
-    if (Platform.OS !== "web") {
-      try {
-        const Purchases = require("react-native-purchases").default;
-        Purchases.addCustomerInfoUpdateListener((updated: any) => {
-          if (mounted.current) {
-            setIsPro(!!updated.entitlements.active["monthly"]);
-          }
-        });
-      } catch { /* Expo Go — ignore */ }
-    }
-
     // Re-check entitlement when the app comes back to the foreground.
-    // Handles: subscription expired mid-session, grace period ended, refund processed.
+    // Handles: subscription renewed, refund processed, restore completed.
     const sub = AppState.addEventListener("change", (state) => {
       if (state === "active") refreshStatus();
     });
@@ -69,13 +59,16 @@ export function usePro(): ProState {
 
   const restore = useCallback(async (): Promise<boolean> => {
     if (Platform.OS === "web") return false;
+    const userId = getAppUserId();
+    if (!userId) return false;
     try {
-      const Purchases = require("react-native-purchases").default;
-      const info = await Purchases.restorePurchases();
-      const active = !!info.entitlements.active["monthly"];
+      const { restoreAndValidate } = await import("@/services/iapService");
+      const active = await restoreAndValidate(userId);
       if (mounted.current) setIsPro(active);
       if (!active) {
-        toast.info("No active subscription found on this Apple ID. If you subscribed on a different account, please sign out of the App Store and try again.");
+        toast.info(
+          "No active subscription found on this Apple ID. If you subscribed on a different account, please sign out of the App Store and try again.",
+        );
       }
       return active;
     } catch (err) {
